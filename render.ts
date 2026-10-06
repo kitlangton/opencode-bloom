@@ -26,6 +26,7 @@ const { values: a } = parseArgs({
     serve: { type: "boolean", default: false },
     port: { type: "string", default: "8517" },
     audio: { type: "boolean", default: true },
+    "no-audio": { type: "boolean", default: false },
   },
 })
 
@@ -136,7 +137,7 @@ if (a.serve) {
   if (ffmpeg) {
     await (ffmpeg.stdin as import("bun").FileSink).end()
     await ffmpeg.exited
-    if (a.audio) await addScore(resolve(a.out!))
+    if (a.audio && !a["no-audio"]) await addScore(resolve(a.out!))
     console.log("wrote", a.out)
   }
   server.stop(true)
