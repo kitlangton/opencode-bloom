@@ -133,7 +133,7 @@ Busy moments duck the pad and the texture. Everything feeds a Freeverb send, the
 
 ## Releases
 
-Releases use version tags, not Changesets. `npm run prepublishOnly` checks the types and tests. After bootstrap publishing and configuring npm's trusted publisher, pushing a matching `vX.Y.Z` tag runs `.github/workflows/release.yml` to publish with GitHub OIDC.
+Releases use version tags, not Changesets. `npm run prepublishOnly` checks the types, tests and packed file list. A matching `vX.Y.Z` tag runs `.github/workflows/release.yml` to publish through npm's GitHub trusted publisher. The package check rejects unexpected files, test sources, private extracts and videos.
 
 ## License
 
