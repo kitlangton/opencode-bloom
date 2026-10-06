@@ -259,7 +259,7 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
       const r = n.r * bodyScale
       const e = Math.min(1.6, n.energy)
       const kk = n.root ? 1 : 0.6
-      glow(sx(n.x), sy(n.y), r * 3.4 + (8 + 16 * e) * S, h.color, (0.05 + 0.16 * k + 0.18 * e) * kk + n.spawnFlash * 0.7)
+      glow(sx(n.x), sy(n.y), r * 3 + (8 + 12 * e) * S, h.color, (0.05 + 0.15 * k + 0.16 * e) * kk + n.spawnFlash * 0.7)
     }
 
     // sparks
