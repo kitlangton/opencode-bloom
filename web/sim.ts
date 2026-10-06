@@ -382,8 +382,11 @@ export class Sim {
       h.heat *= Math.exp(-0.45 * dt)
     }
     // Per-cluster extent (radius of territory) eases toward the real spread.
+    // Territory is measured around the members' own centroid, so a hub that drifts from its
+    // sessions can't inflate its extent and push itself further away (a runaway loop).
     const spread = new Float64Array(hubs.length)
     const members = new Float64Array(hubs.length)
+    const cxs = new Float64Array(hubs.length), cys = new Float64Array(hubs.length)
     for (const n of nodes) {
       if (!n.alive) continue
       n.vx *= damp; n.vy *= damp
@@ -395,16 +398,21 @@ export class Sim {
       const w = 16, z = 0.42
       n.rv += (-(n.r - target) * w * w - 2 * z * w * n.rv) * dt
       n.r += n.rv * dt
-      const h = hubs[n.cluster]!
-      const d = Math.hypot(n.x - h.x, n.y - h.y) + n.r
-      spread[n.cluster]! += d * d
+      cxs[n.cluster]! += n.x; cys[n.cluster]! += n.y
       members[n.cluster]! += 1
+    }
+    for (const n of nodes) {
+      if (!n.alive) continue
+      const m = members[n.cluster]!
+      const d = Math.hypot(n.x - cxs[n.cluster]! / m, n.y - cys[n.cluster]! / m) + n.r
+      spread[n.cluster]! += d * d
     }
     for (let i = 0; i < hubs.length; i++) {
       const h = hubs[i]!
       if (!h.alive) continue
       const rms = members[i]! ? Math.sqrt(spread[i]! / members[i]!) : 0
-      h.extent += (Math.max(24, rms * 1.5 + 10) - h.extent) * (1 - Math.exp(-1 * dt))
+      const want = Math.min(Math.max(24, rms * 1.5 + 10), 40 + 22 * Math.sqrt(members[i]!))
+      h.extent += (want - h.extent) * (1 - Math.exp(-1 * dt))
     }
 
     // Kit's avatar glides toward the sessions he has been prompting (weighted toward the

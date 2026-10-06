@@ -57,7 +57,7 @@ export class Camera {
     const box = this.fit(sim, outro)
     if (!box) return
     const W = this.width, H = this.height, u = this.unit
-    const mx = W * 0.1, mt = H * 0.16, mb = H * 0.13
+    const mx = W * 0.1, mt = H * (outro ? 0.12 : 0.16), mb = H * (outro ? 0.1 : 0.13)
     const cx = (box.x0 + box.x1) / 2
     const cy = (box.y0 + box.y1) / 2
     const bw = Math.max(240, box.x1 - box.x0), bh = Math.max(200, box.y1 - box.y0)
