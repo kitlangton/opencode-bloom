@@ -71,6 +71,7 @@ let frameIndex = 0
   let pending: Promise<unknown> = Promise.resolve()
   let ws: WebSocket | null = null
   let inflight = 0
+  let queued = 0
   let wake: (() => void) | null = null
   if (video) {
     ws = new WebSocket(`ws://${location.host}/ws`)
@@ -94,7 +95,9 @@ let frameIndex = 0
       const stillPixels = isStill && isVideo ? (await gpu.read("rgba")).pixels : null
       const { pixels } = await gpu.read(isVideo ? "yuv" : "rgba")
       const t2 = performance.now()
-      // Posts stay ordered: each waits for the previous frame's post.
+      // Sends stay ordered: each waits for the previous frame's. Bound the backlog so
+      // rendering can't run ahead of the encoder and pile up frames in memory.
+      if (++queued > 16) await pending
       const prev = pending
       pending = pixels.then(async (px) => {
         const body = px as Uint8Array<ArrayBuffer>
@@ -108,6 +111,7 @@ let frameIndex = 0
           inflight++
           ws!.send(body)
         }
+        queued--
         prof[5] = (prof[5] ?? 0) + (performance.now() - tf)
       })
       prof[0] = prof[0]! + t1 - t0; prof[1] = prof[1]! + t2 - t1; prof[3] = prof[3]! + 1

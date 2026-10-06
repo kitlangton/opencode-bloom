@@ -1,7 +1,7 @@
 // Turns simulation state into screen-space quads: camera, bodies, light, type.
 import { FLOATS } from "./shaders"
 import { MAX_QUADS, MAX_OVERLAY } from "./gpu"
-import { GOLD, KIT, STEP, rng, type RGB, type Sim } from "./sim"
+import { BEAM_TRAVEL, GOLD, KIT, STEP, rng, type RGB, type Sim } from "./sim"
 import type { Atlas } from "./text"
 
 const GLOW = 10, DISC = 1, RING = 2, LINE = 3, TEXT = 4, SOFT = 15, ADD_DISC = 11, ADD_RING = 12, ADD_LINE = 13
@@ -11,7 +11,8 @@ const scale = (a: RGB, k: number): RGB => [a[0] * k, a[1] * k, a[2] * k]
 const WHITE: RGB = [1, 1, 1]
 const clamp01 = (x: number) => Math.min(1, Math.max(0, x))
 const easeOut = (t: number) => 1 - Math.pow(1 - t, 3)
-const easeInOut = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2)
+// minimum-jerk travel: continuous velocity and acceleration at both ends
+const smoother = (t: number) => t * t * t * (t * (t * 6 - 15) + 10)
 
 export class Camera {
   x = 0; y = 0; vx = 0; vy = 0
@@ -108,15 +109,16 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
   const ring = (x: number, y: number, r: number, w: number, c: RGB, a: number, additive = true) => push(x, y, 0, 0, r, w, additive ? ADD_RING : RING, 1, c, a)
   const line = (x0: number, y0: number, x1: number, y1: number, w: number, c: RGB, a: number, endAlpha = 1, additive = false) => push(x0, y0, x1, y1, w, 0, additive ? ADD_LINE : LINE, endAlpha, c, a)
   const soft = (x0: number, y0: number, x1: number, y1: number, w: number, c: RGB, a: number, endAlpha = 1) => push(x0, y0, x1, y1, w, 0, SOFT, endAlpha, c, a)
-  const text = (s: string, x: number, y: number, px: number, c: RGB, a: number, opts: { weight?: number; align?: "left" | "right" | "center"; tracking?: number } = {}) => {
+  // Moving labels stay unsnapped so they glide; fixed UI snaps to whole pixels for crispness.
+  const text = (s: string, x: number, y: number, px: number, c: RGB, a: number, opts: { weight?: number; align?: "left" | "right" | "center"; tracking?: number; snap?: boolean } = {}) => {
     const g = atlas.get(s, Math.round(px), opts.weight ?? 500, opts.tracking ?? 0)
     const pad = atlas.pad(g)
     let left = x - pad
     const inner = g.w - pad * 2
     if (opts.align === "right") left -= inner
     else if (opts.align === "center") left -= inner / 2
-    const top = Math.round(y - g.ascent)
-    left = Math.round(left)
+    let top = y - g.ascent
+    if (opts.snap) { top = Math.round(top); left = Math.round(left) }
     push(left, top, left + g.w, top + g.h, 0, 0, TEXT, 1, c, a, g.uv)
     return inner
   }
@@ -191,7 +193,7 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
         return [i * i * ax + 2 * i * s * mx + s * s * bx, i * i * ay + 2 * i * s * my + s * s * by]
       }
       const head = clamp01(age / c.dur)
-      const hp = easeInOut(head)
+      const hp = smoother(head)
       const fade = age < c.dur ? 1 : Math.max(0, 1 - (age - c.dur) / 2.2)
       const SEG = 28
       for (let i = 0; i < SEG; i++) {
@@ -234,15 +236,18 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
     const av = sim.avatar
     if (av.alive) {
       const avx = sx(av.x), avy = sy(av.y)
+      // many simultaneous prompts share the light instead of whiting out the frame
+      const crowd = 1 / Math.sqrt(Math.max(1, sim.beams.length / 3))
       for (const bm of sim.beams) {
         const n = nodes[bm.to]!
         const age = t - bm.t0
-        const k = clamp01(age / 0.9)
-        const grow = easeOut(clamp01(age / 0.12))
+        const k = clamp01((age - BEAM_TRAVEL) / 0.75)
+        const grow = smoother(clamp01(age / BEAM_TRAVEL))
         const tx = avx + (sx(n.x) - avx) * grow, ty = avy + (sy(n.y) - avy) * grow
-        const a = (1 - k) * (1 - k)
-        soft(avx, avy, tx, ty, 5 * S, KIT, 0.35 * a, 0.8)
-        line(avx, avy, tx, ty, 0.7 * S, KIT, 0.8 * a, 1, true)
+        const a = (1 - k) * (1 - k) * crowd
+        soft(avx, avy, tx, ty, 5 * S, KIT, 0.3 * a, 0.9)
+        line(avx, avy, tx, ty, 0.7 * S, KIT, 0.75 * a, 1, true)
+        if (grow < 1) { glow(tx, ty, 10 * S, KIT, 0.8); disc(tx, ty, 1.8 * S, WHITE, 1.5, true) }
       }
     }
 
@@ -343,12 +348,12 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
         cx /= m; cy /= m
         let rms = 0
         for (const n of nodes) if (n.alive && n.cluster === i) rms += (sx(n.x) - cx) ** 2 + (sy(n.y) - cy) ** 2
-        const lim = Math.max(40 * S, 2.2 * Math.sqrt(rms / m))
+        const lim = Math.max(80 * S, 2.5 * Math.sqrt(rms / m))
         x0 = y0 = Infinity; x1 = y1 = -Infinity
         for (const n of nodes) {
           if (!n.alive || n.cluster !== i) continue
           const x = sx(n.x), y = sy(n.y)
-          if (Math.hypot(x - cx, y - cy) > lim) continue
+          if (!n.root && Math.hypot(x - cx, y - cy) > lim) continue
           const r = n.r * bodyScale + 5 * S
           x0 = Math.min(x0, x - r); x1 = Math.max(x1, x + r); y0 = Math.min(y0, y - r); y1 = Math.max(y1, y + r)
         }
@@ -374,7 +379,9 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
       st.y = fresh ? ty : st.y + (ty - st.y) * 0.16
       const heat = clamp01(h.heat * 1.4 + Math.exp(-(t - h.lastActive) / 3) * 0.5)
       const born = clamp01((t - h.born - 0.15) / 0.8)
-      const ta = (0.36 + 0.6 * heat) * born * dim
+      // in the closing pull-back every project is named: the map of the day
+      const outro = clamp01((t - sim.warp.end - 0.8) / 1.5)
+      const ta = Math.max(0.36 + 0.6 * heat, 0.78 * outro) * born * (dim + (1 - dim) * outro * 0.6)
       st.a = Math.max(1e-4, st.a + (ta - st.a) * 0.12)
       text(h.label, st.x, st.y, px, mix(h.color, WHITE, 0.6), st.a, { weight: 500, align: "center", tracking: 0.3 * S })
     }
@@ -393,7 +400,7 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
     const real = sim.realTime
     const L = 56 * unit, T = 64 * unit
     const ui = clamp01((t - 0.1) / 0.8)
-    text(opts.dateLabel(real), L, T, 15 * unit, [0.8, 0.84, 0.95], 0.55 * ui, { weight: 500, tracking: 1.2 * unit })
+    text(opts.dateLabel(real), L, T, 15 * unit, [0.8, 0.84, 0.95], 0.55 * ui, { weight: 500, tracking: 1.2 * unit, snap: true })
     {
       const hhmm = opts.timeLabel(real)
       const px = 40 * unit
@@ -401,7 +408,7 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
       let x = L - 1 * unit
       for (const ch of hhmm) {
         const w = ch === ":" ? adv * 0.42 : adv
-        text(ch, x + w / 2, T + 44 * unit, px, [0.93, 0.95, 1], 0.92 * ui, { weight: 300, align: "center" })
+        text(ch, x + w / 2, T + 44 * unit, px, [0.93, 0.95, 1], 0.92 * ui, { weight: 300, align: "center", snap: true })
         x += w
       }
     }
@@ -416,7 +423,7 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
       const item = (draw: (x: number) => number, label: string) => {
         const w = draw(x)
         x += w + 8 * unit
-        x += text(label, x, y + 4.5 * unit, px, c, a, { weight: 500, tracking: 0.4 * unit }) + 22 * unit
+        x += text(label, x, y + 4.5 * unit, px, c, a, { weight: 500, tracking: 0.4 * unit, snap: true }) + 22 * unit
       }
       const base: RGB = [0.48, 0.64, 1.0]
       item((x) => { disc(x + 5 * unit, y, 4 * unit, base, ui); ring(x + 5 * unit, y, 7 * unit, 0.9 * unit, base, 0.6 * ui); return 12 * unit }, "session")

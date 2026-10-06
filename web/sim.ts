@@ -4,6 +4,7 @@ import { EV, type EventLog } from "../shared/events"
 import { buildWarp, type Warp } from "./warp"
 
 export const STEP = 1 / 480
+export const BEAM_TRAVEL = 0.16
 
 export type RGB = [number, number, number]
 
@@ -87,7 +88,7 @@ export class Sim {
   sage = new Float32Array(MAX_SPARKS); slife = new Float32Array(MAX_SPARKS)
   ssize = new Float32Array(MAX_SPARKS); shub = new Int16Array(MAX_SPARKS)
   sparkHead = 0
-  avatar = { x: 0, y: 0, vx: 0, vy: 0, target: -1, alive: false, lastPrompt: -1e9, trail: [] as [number, number][] }
+  avatar = { x: 0, y: 0, vx: 0, vy: 0, target: -1, alive: false, lastPrompt: -1e9, trail: [] as [number, number][], recent: [] as { n: number; t: number }[] }
   private eventTimes: Float64Array
   private next = 0
   private rand = rng(7)
@@ -129,7 +130,7 @@ export class Sim {
 
   /** Real wall-clock ms (epoch) currently shown. */
   get realTime() {
-    return this.log.meta.from + this.warp.toReal(this.time)
+    return Math.min(this.log.meta.to - 60_000, this.log.meta.from + this.warp.toReal(this.time))
   }
 
   advanceTo(t: number) {
@@ -265,8 +266,10 @@ export class Sim {
           }
           av.target = n
           av.lastPrompt = this.time
+          av.recent.push({ n, t: this.time })
           this.beams.push({ to: n, t0: this.time })
-          this.rings.push({ node: n, t0: this.time, dur: 1.1, grow: 34, color: KIT, width: 1.6, alpha: 0.9 })
+          // the ring opens when the beam's bead lands
+          this.rings.push({ node: n, t0: this.time + BEAM_TRAVEL, dur: 1.1, grow: 34, color: KIT, width: 1.6, alpha: 0.9 })
         } else {
           this.rings.push({ node: n, t0: this.time, dur: 0.8, grow: 18, color: this.hubs[node.cluster]!.color, width: 1.2, alpha: 0.7 })
         }
@@ -321,6 +324,7 @@ export class Sim {
         const rest = a.extent + p.extent + 60
         const f = (d - rest) * 3
         fx += (dx / d) * f; fy += (dy / d) * f
+        p.vx -= (dx / d) * f * dt * 0.5; p.vy -= (dy / d) * f * dt * 0.5
       }
       a.vx += fx * dt; a.vy += fy * dt
     }
@@ -335,13 +339,21 @@ export class Sim {
       const ax = anchor ? anchor.x : hub.x
       const ay = anchor ? anchor.y : hub.y
       {
+        // Reciprocal tether: the anchor feels the pull too (scaled by mass), otherwise
+        // children pushing on a parent they don't pull back would propel it forever.
         const dx = ax - a.x, dy = ay - a.y
         const d = Math.sqrt(dx * dx + dy * dy) + 1e-6
         const rest = anchor ? anchor.r + a.r + 16 : 30 + a.r
         const k = anchor ? 70 : 40
         const f = (d - rest) * k
-        fx += (dx / d) * f; fy += (dy / d) * f
-        if (!anchor) { hub.vx -= (dx / d) * f * dt * 0.08; hub.vy -= (dy / d) * f * dt * 0.08 }
+        const ux = dx / d, uy = dy / d
+        fx += ux * f; fy += uy * f
+        const ma = a.root ? 2 : 1
+        const mb = anchor ? (anchor.root ? 2 : 1) : 4 + hub.count
+        const back = (f * dt * ma) / mb
+        if (anchor) { anchor.vx -= ux * back; anchor.vy -= uy * back }
+        else { hub.vx -= ux * back; hub.vy -= uy * back }
+        fx /= ma; fy /= ma
       }
       for (let j = i + 1; j < nodes.length; j++) {
         const b = nodes[j]!
@@ -371,6 +383,7 @@ export class Sim {
     }
     // Per-cluster extent (radius of territory) eases toward the real spread.
     const spread = new Float64Array(hubs.length)
+    const members = new Float64Array(hubs.length)
     for (const n of nodes) {
       if (!n.alive) continue
       n.vx *= damp; n.vy *= damp
@@ -384,21 +397,29 @@ export class Sim {
       n.r += n.rv * dt
       const h = hubs[n.cluster]!
       const d = Math.hypot(n.x - h.x, n.y - h.y) + n.r
-      if (d > spread[n.cluster]!) spread[n.cluster] = d
+      spread[n.cluster]! += d * d
+      members[n.cluster]! += 1
     }
     for (let i = 0; i < hubs.length; i++) {
       const h = hubs[i]!
       if (!h.alive) continue
-      h.extent += (Math.max(24, spread[i]!) - h.extent) * (1 - Math.exp(-2 * dt))
+      const rms = members[i]! ? Math.sqrt(spread[i]! / members[i]!) : 0
+      h.extent += (Math.max(24, rms * 1.5 + 10) - h.extent) * (1 - Math.exp(-1 * dt))
     }
 
-    // Kit's avatar glides toward the session he last prompted, with weight.
+    // Kit's avatar glides toward the sessions he has been prompting (weighted toward the
+    // latest), like a Gource committer drifting among the files it touches.
     const av = this.avatar
     if (av.alive && av.target >= 0) {
-      const n = nodes[av.target]!
-      const off = n.r + 22
-      const tx = n.x + off * 0.7, ty = n.y - off * 0.7
-      const w = 6.5, z = 0.82
+      let tx = 0, ty = 0, tw = 0
+      for (const p of av.recent) {
+        const w = Math.exp(-(t - p.t) / 0.9) * (p.n === av.target ? 2 : 1)
+        const n = nodes[p.n]!
+        tx += n.x * w; ty += n.y * w; tw += w
+      }
+      if (tw < 1e-4) { const n = nodes[av.target]!; tx = n.x; ty = n.y; tw = 1 }
+      tx = tx / tw + 26; ty = ty / tw - 26
+      const w = 3.6, z = 0.9
       av.vx += (-(av.x - tx) * w * w - 2 * z * w * av.vx) * dt
       av.vy += (-(av.y - ty) * w * w - 2 * z * w * av.vy) * dt
       av.x += av.vx * dt; av.y += av.vy * dt
@@ -417,6 +438,7 @@ export class Sim {
       this.rings = this.rings.filter((r) => t - r.t0 < r.dur)
       this.comets = this.comets.filter((c) => t - c.t0 < c.dur + 2.2)
       this.beams = this.beams.filter((b) => t - b.t0 < 0.9)
+      this.avatar.recent = this.avatar.recent.filter((p) => t - p.t < 5)
       this.pulses = this.pulses.filter((p) => t - p.t0 < p.dur + 0.1)
     }
   }
