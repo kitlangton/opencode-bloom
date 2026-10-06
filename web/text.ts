@@ -1,7 +1,7 @@
-// Text rasterized once into a 2048² atlas at exact output pixel size, addressed by uv.
+// Text rasterized once into a 4096² atlas at exact output pixel size, addressed by uv.
 export interface Glyph { uv: [number, number, number, number]; w: number; h: number; ascent: number }
 
-const SIZE = 2048
+const SIZE = 4096
 const FONT = `-apple-system, "SF Pro Display", "SF Pro Text", "Helvetica Neue", system-ui, sans-serif`
 
 export function createAtlas() {

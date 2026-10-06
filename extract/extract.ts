@@ -43,13 +43,14 @@ const isDenied = (s: string) => !!denyRe && new RegExp(denyRe.source, "i").test(
 const scrub = (s: string) => (denyRe ? s.replace(denyRe, "•••") : s)
 
 // ---- messages in window
-type Row = { sid: string; type: string; t: number; origin: string | null; streamed: number | null; completed: number | null; tools: string | null }
+type Row = { sid: string; type: string; t: number; origin: string | null; streamed: number | null; completed: number | null; tools: string | null; files: string | null }
 const rows = db.query<Row, [number, number]>(`
   select m.session_id sid, m.type type, m.time_created t,
     case when m.type='user' then json_extract(m.data,'$.metadata."anomaly.session".originSessionID') end origin,
     case when m.type='assistant' then json_extract(m.data,'$.time.streamed') end streamed,
     case when m.type='assistant' then json_extract(m.data,'$.time.completed') end completed,
-    case when m.type='assistant' then (select json_group_array(json_extract(c.value,'$.name')) from json_each(m.data,'$.content') c where json_extract(c.value,'$.type')='tool') end tools
+    case when m.type='assistant' then (select json_group_array(json_extract(c.value,'$.name')) from json_each(m.data,'$.content') c where json_extract(c.value,'$.type')='tool') end tools,
+    case when m.type='assistant' then (select json_group_array(coalesce(json_extract(c.value,'$.state.input.filePath'), json_extract(c.value,'$.state.input.path'), '')) from json_each(m.data,'$.content') c where json_extract(c.value,'$.type')='tool') end files
   from session_message m
   where m.time_created >= ? and m.time_created < ? and m.type in ('user','assistant')
   order by m.time_created`).all(from, to)
@@ -121,6 +122,18 @@ const node = (id: string): number => {
 // Stable order: by creation time.
 for (const s of [...sessions.values()].sort((a, b) => a.time_created - b.time_created)) node(s.id)
 
+// ---- edited files: basenames only, and nothing that looks like a secret or config
+const files: string[] = []
+const fileIdx = new Map<string, number>()
+const SECRETISH = /env|secret|token|cred|key|passw|auth|\.pem$|\.p12$/i
+const fileIndex = (path: string) => {
+  const base = path.split("/").pop() ?? ""
+  if (!base || base.startsWith(".") || base.length > 40 || SECRETISH.test(base) || isDenied(base)) return -1
+  let i = fileIdx.get(base)
+  if (i === undefined) { i = files.length; files.push(base); fileIdx.set(base, i) }
+  return i
+}
+
 // ---- events
 const events: [number, number, number, number][] = []
 const appeared = new Set<number>()
@@ -154,9 +167,14 @@ for (const r of rows) {
     const tools: string[] = r.tools ? JSON.parse(r.tools) : []
     const a = r.streamed ?? r.t
     const b = Math.max(a, Math.min(r.completed ?? a, a + 120_000))
+    const paths: string[] = r.files ? JSON.parse(r.files) : []
     tools.forEach((name, i) => {
       const t = Math.round(a + ((b - a) * (i + 0.5)) / tools.length)
       events.push([Math.min(t, to - 1), EV.tool, n, toolKind(name)])
+      if (name === "edit" || name === "write") {
+        const f = fileIndex(paths[i] ?? "")
+        if (f >= 0) events.push([Math.min(t, to - 1), EV.file, n, f])
+      }
     })
   }
 }
@@ -183,6 +201,7 @@ const log: EventLog = {
   },
   clusters,
   sessions: nodes,
+  files,
   events: events.map(([t, type, n, x]) => [t - from, type, n, x]),
 }
 

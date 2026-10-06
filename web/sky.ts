@@ -6,7 +6,7 @@ type V3 = [number, number, number]
 interface Key { h: number; top: V3; bottom: V3; glow: V3; tint: V3; stars: number }
 
 const NIGHT: Omit<Key, "h"> = { top: [0.005, 0.006, 0.013], bottom: [0.011, 0.012, 0.024], glow: [0, 0, 0], tint: [0.85, 0.9, 1.1], stars: 1 }
-const DAY: Omit<Key, "h"> = { top: [0.02, 0.05, 0.1], bottom: [0.032, 0.075, 0.125], glow: [0.008, 0.02, 0.03], tint: [0.8, 1.0, 1.2], stars: 0.28 }
+const DAY: Omit<Key, "h"> = { top: [0.016, 0.04, 0.084], bottom: [0.026, 0.062, 0.105], glow: [0.008, 0.02, 0.03], tint: [0.8, 1.0, 1.2], stars: 0.28 }
 const KEYS: Key[] = [
   { h: 0, ...NIGHT },
   { h: 4.2, ...NIGHT },

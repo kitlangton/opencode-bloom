@@ -31,14 +31,14 @@ struct Out {
     let len = max(length(d), 0.0001);
     let dir = d / len;
     let nrm = vec2f(-dir.y, dir.x);
-    let e = q.b.x + 1.5;
+    let e = q.b.x + 1.5 + q.uv.x;
     p = q.a.xy + dir * (-e + c.x * (len + 2.0 * e)) + nrm * (-e + c.y * 2.0 * e);
   } else if (kind == 4.0) {
     p = mix(q.a.xy, q.a.zw, c);
     tuv = mix(q.uv.xy, q.uv.zw, c);
   } else {
-    var e = q.b.x + 1.5;
-    if (kind == 2.0) { e = q.b.x + q.b.y + 1.5; }
+    var e = q.b.x + 1.5 + q.uv.x;
+    if (kind == 2.0) { e = q.b.x + q.b.y + 1.5 + q.uv.x; }
     if (kind == 7.0) { e = q.b.x + q.b.y * 3.0 + 1.5; }
     p = q.a.xy + (c * 2.0 - 1.0) * e;
   }
@@ -63,6 +63,8 @@ fn segDist(p: vec2f, a: vec2f, b: vec2f) -> vec2f {
   let additive = kindRaw >= 10.0;
   let kind = kindRaw % 10.0;
   let texel = textureSampleLevel(atlas, smp, in.tuv, 0.0);
+  // depth-of-field softness in px (non-text quads carry it in uv.x)
+  let soft = 1.0 + select(q.uv.x, 0.0, kind == 4.0);
   var cov = 0.0;
   if (kind == 0.0) {
     let d = length(in.p - q.a.xy) / max(q.b.x, 0.001);
@@ -70,15 +72,15 @@ fn segDist(p: vec2f, a: vec2f, b: vec2f) -> vec2f {
     cov = max(0.0, (g - 0.011) / 0.989);
   } else if (kind == 1.0) {
     let d = length(in.p - q.a.xy);
-    cov = clamp(q.b.x - d + 0.5, 0.0, 1.0);
+    cov = clamp((q.b.x - d) / soft + 0.5, 0.0, 1.0);
   } else if (kind == 2.0) {
     let d = length(in.p - q.a.xy);
     let w = max(q.b.y, 0.6);
-    cov = clamp(w * 0.5 - abs(d - q.b.x) + 0.5, 0.0, 1.0) * min(1.0, q.b.y / 0.6);
+    cov = clamp((w * 0.5 - abs(d - q.b.x)) / soft + 0.5, 0.0, 1.0) * min(1.0, q.b.y / 0.6) * (0.6 + 0.4 / soft);
   } else if (kind == 3.0) {
     let s = segDist(in.p, q.a.xy, q.a.zw);
     let w = max(q.b.x, 0.5);
-    cov = clamp(w - s.x + 0.5, 0.0, 1.0) * min(1.0, q.b.x / 0.5) * mix(1.0, q.b.w, s.y);
+    cov = clamp((w - s.x) / soft + 0.5, 0.0, 1.0) * min(1.0, q.b.x / 0.5) * mix(1.0, q.b.w, s.y) * (0.6 + 0.4 / soft);
   } else if (kind == 5.0) {
     let s = segDist(in.p, q.a.xy, q.a.zw);
     let d = s.x / max(q.b.x, 0.001);
@@ -89,7 +91,7 @@ fn segDist(p: vec2f, a: vec2f, b: vec2f) -> vec2f {
     let rel = in.p - q.a.xy;
     let r = max(q.b.x, 0.5);
     let d = length(rel) / r;
-    cov = clamp(q.b.x - length(rel) + 0.5, 0.0, 1.0);
+    cov = clamp((q.b.x - length(rel)) / soft + 0.5, 0.0, 1.0);
     let core = exp(-d * d * 2.2);
     let limb = mix(0.5, 1.0, sqrt(max(0.0, 1.0 - d * d)));
     let hl = exp(-dot(rel / r + vec2f(0.35, 0.4), rel / r + vec2f(0.35, 0.4)) * 6.0);

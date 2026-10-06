@@ -90,6 +90,10 @@ export class Sim {
   rings: Ring[] = []
   comets: Comet[] = []
   cues: Cue[] = []
+  /** file names drifting off sessions as they're edited (Gource-style), sparsely */
+  drifts: { node: number; name: string; t0: number; angle: number }[] = []
+  private lastDrift = -1e9
+  private lastDriftBy = new Map<number, number>()
   counts = { sessions: 0, subagents: 0, messages: 0 }
   pulses: Pulse[] = []
   // Sparks live in flat arrays: x, y, vx, vy, age, life, size, node-color index.
@@ -332,6 +336,18 @@ export class Sim {
         this.nodes[n]!.msgs++
         this.touch(n, 0.32)
         break
+      case EV.file: {
+        // rate-limited hard: one name every ~0.45 s overall, one per session per 2.5 s,
+        // and never more than five in the air
+        const name = this.log.files?.[x]
+        if (!name || !this.nodes[n]!.alive) break
+        if (this.time - this.lastDrift < 0.45 || this.time - (this.lastDriftBy.get(n) ?? -1e9) < 2.5) break
+        if (this.drifts.filter((d) => this.time - d.t0 < 1.6).length >= 5) break
+        this.lastDrift = this.time
+        this.lastDriftBy.set(n, this.time)
+        this.drifts.push({ node: n, name, t0: this.time, angle: this.rand() * Math.PI * 2 })
+        break
+      }
       case EV.tool: {
         const big = x === 1 || x === 4
         this.spark(n, big ? 95 : 70, big ? 1.1 : 0.8, big ? 1.6 : 1.1, undefined, Math.min(4, x))
@@ -423,7 +439,9 @@ export class Sim {
         fx /= ma; fy /= ma
         // leaves orbit their parent slowly; siblings share a direction, like a little system
         if (anchor && a.parent !== null) {
-          const spin = (a.parent % 2 ? 1 : -1) * 9
+          // finished leaves stop circling and settle into fixed points of the map
+          const settled = Math.min(1, Math.max(0, (this.time - a.lastActive - 6) / 8))
+          const spin = (a.parent % 2 ? 1 : -1) * 9 * (1 - settled)
           fx += -uy * spin; fy += ux * spin
         }
       }
@@ -534,6 +552,7 @@ export class Sim {
       this.rings = this.rings.filter((r) => t - r.t0 < r.dur)
       this.comets = this.comets.filter((c) => t - c.t0 < c.dur + 2.2)
       this.pulses = this.pulses.filter((p) => t - p.t0 < p.dur + 0.1)
+      this.drifts = this.drifts.filter((d) => t - d.t0 < 1.8)
     }
   }
 

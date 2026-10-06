@@ -16,7 +16,7 @@ export async function createGpu(width: number, height: number, canvas: HTMLCanva
   const gpu: Gpu = await initFromDevice(device)
   const linear = sampler(gpu, { magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" })
 
-  const atlas = texture(gpu, { kind: "2d", size: [2048, 2048], format: "rgba8unorm", usage: ["texture_binding", "copy_dst", "render_attachment"] })
+  const atlas = texture(gpu, { kind: "2d", size: [4096, 4096], format: "rgba8unorm", usage: ["texture_binding", "copy_dst", "render_attachment"] })
   const quadBuf = storage(gpu, MAX_QUADS * FLOATS * 4)
   const quads = draw(gpu, { shader: quadWgsl, vertices: 6, blend: "premultiplied" })
   quads.set({ quads: quadBuf, view: { size: [width, height], pad: [0, 0] }, atlas, smp: linear })
@@ -75,7 +75,7 @@ export async function createGpu(width: number, height: number, canvas: HTMLCanva
   return {
     gpu,
     uploadAtlas(source: OffscreenCanvas) {
-      device.queue.copyExternalImageToTexture({ source }, { texture: (atlas as any).gpu, premultipliedAlpha: true }, [2048, 2048])
+      device.queue.copyExternalImageToTexture({ source }, { texture: (atlas as any).gpu, premultipliedAlpha: true }, [4096, 4096])
     },
     render(data: Float32Array, count: number, over: Float32Array, overCount: number, post: PostParams) {
       quadBuf.write(data.subarray(0, count * FLOATS) as Float32Array<ArrayBuffer>)

@@ -8,6 +8,8 @@ import type { Atlas } from "./text"
 
 const GLOW = 10, DISC = 1, RING = 2, LINE = 3, TEXT = 4, SOFT = 15, ADD_DISC = 11, ADD_RING = 12, ADD_LINE = 13, ORB = 6, FLARE = 17
 
+// read, edit, shell, web, delegate: distinct but in the same pastel key as the projects
+const TOOL_COLORS: RGB[] = [[0.6, 0.85, 1.0], [1.0, 0.8, 0.5], [0.55, 1.0, 0.78], [0.78, 0.66, 1.0], [1.0, 0.64, 0.8]]
 const mix = (a: RGB, b: RGB, t: number): RGB => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
 const scale = (a: RGB, k: number): RGB => [a[0] * k, a[1] * k, a[2] * k]
 const WHITE: RGB = [1, 1, 1]
@@ -116,15 +118,47 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
   const cam = new Camera(width, height, u)
   const labels: { x: number; y: number; a: number; side: number }[] = []
 
+  // The whole field sits on a gently tilted plane: a slow pitch and yaw with mild
+  // perspective, and a shallow depth of field that softens edges away from focus.
+  const tilt = { on: false, cx: 0, cy: 0, cp: 1, sp: 0, cy_: 1, sy: 0, f: 1, blur: 0 }
+  const proj = (x: number, y: number): [number, number, number, number] => {
+    const dx = x - tilt.cx, dy = y - tilt.cy
+    const z = -dy * tilt.sp + dx * tilt.sy
+    const k = tilt.f / (tilt.f + z)
+    return [tilt.cx + dx * tilt.cy_ * k, tilt.cy + dy * tilt.cp * k, k, Math.min(1, Math.abs(z) / (height * 0.45))]
+  }
   const push = (x0: number, y0: number, x1: number, y1: number, size: number, thick: number, kind: number, endAlpha: number, c: RGB, a: number, uv?: [number, number, number, number]) => {
     if (counts[layer]! >= caps[layer]! || Math.abs(a) <= 0.002) return
+    let soften = 0
+    if (tilt.on) {
+      const shape = kind % 10
+      if (shape === TEXT) {
+        // text keeps its size and stays crisp; only its anchor moves with the plane
+        const [px0, py0] = proj((x0 + x1) / 2, (y0 + y1) / 2)
+        const ddx = px0 - (x0 + x1) / 2, ddy = py0 - (y0 + y1) / 2
+        x0 += ddx; x1 += ddx; y0 += ddy; y1 += ddy
+        if (size || thick) { size += ddy; thick += ddy }
+      } else {
+        const p0 = proj(x0, y0)
+        let k = p0[2], d = p0[3]
+        if (shape === LINE || shape === SOFT % 10) {
+          const p1 = proj(x1, y1)
+          x1 = p1[0]; y1 = p1[1]
+          k = (k + p1[2]) / 2; d = (d + p1[3]) / 2
+        }
+        x0 = p0[0]; y0 = p0[1]
+        size *= k
+        if (shape === RING || shape === FLARE % 10) thick *= k
+        soften = d * d * tilt.blur
+      }
+    }
     const data = bufs[layer]!
     const b = counts[layer]!++ * FLOATS
     data[b] = x0; data[b + 1] = y0; data[b + 2] = x1; data[b + 3] = y1
     data[b + 4] = size; data[b + 5] = thick; data[b + 6] = kind; data[b + 7] = endAlpha
     data[b + 8] = c[0]; data[b + 9] = c[1]; data[b + 10] = c[2]; data[b + 11] = Math.max(-64, Math.min(a, 64))
     if (uv) { data[b + 12] = uv[0]; data[b + 13] = uv[1]; data[b + 14] = uv[2]; data[b + 15] = uv[3] }
-    else { data[b + 12] = 0; data[b + 13] = 0; data[b + 14] = 0; data[b + 15] = 0 }
+    else { data[b + 12] = soften; data[b + 13] = 0; data[b + 14] = 0; data[b + 15] = 0 }
   }
   const glow = (x: number, y: number, r: number, c: RGB, a: number) => push(x, y, 0, 0, r, 0, GLOW, 1, c, a)
   const disc = (x: number, y: number, r: number, c: RGB, a: number, additive = false) => push(x, y, 0, 0, r, 0, additive ? ADD_DISC : DISC, 1, c, a)
@@ -134,18 +168,21 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
   const flare = (x: number, y: number, len: number, w: number, c: RGB, a: number) => push(x, y, 0, 0, len, w, FLARE, 1, c, a)
   const soft = (x0: number, y0: number, x1: number, y1: number, w: number, c: RGB, a: number, endAlpha = 1) => push(x0, y0, x1, y1, w, 0, SOFT, endAlpha, c, a)
   // Moving labels stay unsnapped so they glide; fixed UI snaps to whole pixels for crispness.
-  const text = (s: string, x: number, y: number, px: number, c: RGB, a: number, opts: { weight?: number; align?: "left" | "right" | "center"; tracking?: number; snap?: boolean; clip?: [number, number, number]; shadow?: boolean } = {}) => {
-    const g = atlas.get(s, Math.round(px), opts.weight ?? 500, opts.tracking ?? 0)
-    const pad = atlas.pad(g)
+  const text = (s: string, x: number, y: number, px: number, c: RGB, a: number, opts: { weight?: number; align?: "left" | "right" | "center"; tracking?: number; snap?: boolean; clip?: [number, number, number]; shadow?: boolean; atlasPx?: number } = {}) => {
+    // animated sizes rasterize once at `atlasPx` and scale, so the atlas stays bounded
+    const apx = Math.round(opts.atlasPx ?? px)
+    const g = atlas.get(s, apx, opts.weight ?? 500, opts.tracking ?? 0)
+    const sc = px / apx
+    const pad = atlas.pad(g) * sc
     let left = x - pad
-    const inner = g.w - pad * 2
+    const inner = g.w * sc - pad * 2
     if (opts.align === "right") left -= inner
     else if (opts.align === "center") left -= inner / 2
-    let top = y - g.ascent
+    let top = y - g.ascent * sc
     if (opts.snap) { top = Math.round(top); left = Math.round(left) }
     const cl = opts.clip
     // a negative alpha tells the shader to skip the soft shadow
-    push(left, top, left + g.w, top + g.h, cl ? cl[0] : 0, cl ? cl[1] : 0, TEXT, cl ? cl[2] : 0, c, opts.shadow === false ? -a : a, g.uv)
+    push(left, top, left + g.w * sc, top + g.h * sc, cl ? cl[0] : 0, cl ? cl[1] : 0, TEXT, cl ? cl[2] : 0, c, opts.shadow === false ? -a : a, g.uv)
     return inner
   }
 
@@ -177,7 +214,7 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
 
   // One reel column: faces clipped to a window one row tall with soft top and bottom
   // edges, and a vertical smear that fades in with speed.
-  function reel(col: Column, x: number, baseline: number, px: number, color: RGB, alpha: number, weight: number) {
+  function reel(col: Column, x: number, baseline: number, px: number, color: RGB, alpha: number, weight: number, atlasPx = px) {
     const row = px * 1.2
     const top = baseline - px * 0.98, bottom = top + row
     const fade = px * 0.14
@@ -191,7 +228,7 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
       const a = (alpha * col.opacity) / taps
       for (let k = 0; k < taps; k++) {
         const off = taps === 1 ? 0 : ((k + 0.5) / taps - 0.5) * travel * row
-        text(g.text, x, y + off, px, color, a, { weight, align: "center", clip: [top, bottom, fade], snap: taps === 1 && Math.abs(g.dy) < 1e-4, shadow: taps === 1 })
+        text(g.text, x, y + off, px, color, a, { weight, align: "center", clip: [top, bottom, fade], snap: taps === 1 && Math.abs(g.dy) < 1e-4, shadow: taps === 1, atlasPx })
       }
     }
   }
@@ -228,9 +265,9 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
     }
     const cpx = (19 + 15 * e) * unit
     const lpx = (10 + 2 * e) * unit
-    const cadv = digitAdvance(cpx, 400)
+    const cadv = digitAdvance(34 * unit, 400) * (cpx / Math.round(34 * unit))
     const gapSmall = 30 * unit, gapBig = 70 * unit
-    const widths = counters.map((k) => Math.max(k.c.width(t) * cadv, measure(k.label, lpx, 600, 1.4 * unit)))
+    const widths = counters.map((k) => Math.max(k.c.width(t) * cadv, measure(k.label, 12 * unit, 600, 1.4 * unit) * (lpx / Math.round(12 * unit))))
     const gap = gapSmall + (gapBig - gapSmall) * e
     const rowW = widths.reduce((a, b) => a + b, 0) + gap * (counters.length - 1)
     const x0a = L, y0a = T + 100 * unit
@@ -241,9 +278,9 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
     const ca = 0.85 * clamp01((t - 0.6) / 0.8)
     counters.forEach((k, i) => {
       const { columns, commas } = k.c.sample(t)
-      for (const col of columns) reel(col, x + (col.x + 0.5) * cadv, y, cpx, ink, ca, 400)
-      for (const cm of commas) text(",", x + cm.x * cadv, y, cpx, ink, ca * cm.opacity, { weight: 400, align: "center" })
-      text(k.label, x, y + (16 + 8 * e) * unit, lpx, [0.72, 0.77, 0.9], 0.5 * ca, { weight: 600, tracking: 1.4 * unit })
+      for (const col of columns) reel(col, x + (col.x + 0.5) * cadv, y, cpx, ink, ca, 400, 34 * unit)
+      for (const cm of commas) text(",", x + cm.x * cadv, y, cpx, ink, ca * cm.opacity, { weight: 400, align: "center", atlasPx: 34 * unit })
+      text(k.label, x, y + (16 + 8 * e) * unit, lpx, [0.72, 0.77, 0.9], 0.5 * ca, { weight: 600, tracking: 1.4 * unit, atlasPx: 12 * unit })
       x += widths[i]! + gap
     })
   }
@@ -265,6 +302,69 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
     let m = 0
     for (const d of "0123456789") m = Math.max(m, measure(d, px, weight, 0))
     return m
+  }
+
+  // Gource-style file names: faint, small, drifting outward from the session and gone fast.
+  function drawDrifts(sim: Sim) {
+    const t = sim.time
+    const z = cam.zoom
+    for (const d of sim.drifts) {
+      const n = sim.nodes[d.node]!
+      if (!n.alive) continue
+      const age = (t - d.t0) / 1.6
+      if (age >= 1) continue
+      const e = easeOut(age)
+      const reach = (n.r * Math.pow(z, 0.72) + 10 + 26 * e) * u
+      const x = (n.x - cam.x) * z * u + width / 2 + Math.cos(d.angle) * reach
+      const y = (n.y - cam.y) * z * u + height / 2 + Math.sin(d.angle) * reach
+      const a = 0.42 * Math.sin(Math.PI * Math.min(1, age * 1.15)) ** 1.2
+      const c = mix(sim.hubs[n.cluster]!.color, WHITE, 0.55)
+      text(d.name, x, y + 3.5 * u, 10.5 * u, c, a, { weight: 500, align: Math.cos(d.angle) >= 0 ? "left" : "right", tracking: 0.2 * u })
+    }
+  }
+
+  // A slim, low-contrast trace of messages per minute along the bottom, with a playhead.
+  let strip: Float32Array | null = null
+  function drawStrip(sim: Sim) {
+    const t = sim.time
+    const L = 56 * unit
+    const W = width - 2 * L
+    const N = Math.max(60, Math.round(W / (3 * unit)))
+    if (!strip) {
+      const span = sim.log.meta.to - sim.log.meta.from
+      const raw = new Float32Array(N)
+      for (const e of sim.log.events) if (e[1] === 3 || e[1] === 4) raw[Math.min(N - 1, Math.floor((e[0] / span) * N))]! += 1
+      const sm = new Float32Array(N)
+      for (let i = 0; i < N; i++) {
+        let a = 0, w = 0
+        for (let k = -3; k <= 3; k++) { const j = i + k; if (j < 0 || j >= N) continue; const g = Math.exp(-(k * k) / 4); a += raw[j]! * g; w += g }
+        sm[i] = a / w
+      }
+      let max = 1e-6
+      for (const v of sm) max = Math.max(max, v)
+      strip = sm.map((v) => Math.pow(v / max, 0.7))
+    }
+    const ui = clamp01((t - 0.6) / 1.0)
+    const base = height - 18 * unit, H = 20 * unit
+    const span = sim.log.meta.to - sim.log.meta.from
+    const playhead = clamp01((sim.realTime - sim.log.meta.from) / span)
+    const ink: RGB = [0.75, 0.82, 0.95]
+    const xAt = (i: number) => L + (i / (N - 1)) * W
+    // baseline hairline
+    line(L, base, L + W, base, 0.5 * unit, ink, 0.1 * ui, 1)
+    for (let i = 1; i < N; i++) {
+      const past = (i / (N - 1)) <= playhead
+      const y0 = base - strip[i - 1]! * H, y1 = base - strip[i]! * H
+      line(xAt(i - 1), y0, xAt(i), y1, 0.7 * unit, ink, (past ? 0.38 : 0.12) * ui, 1)
+      if (past) line(xAt(i), base, xAt(i), y1, 0.6 * unit, ink, 0.07 * ui, 1)
+    }
+    const px = L + playhead * W
+    const pi = playhead * (N - 1)
+    const lo = Math.floor(pi), hi = Math.min(N - 1, lo + 1)
+    const py = base - (strip[lo]! + (strip[hi]! - strip[lo]!) * (pi - lo)) * H
+    line(px, base + 2 * unit, px, base - H - 3 * unit, 0.6 * unit, ink, 0.25 * ui, 1)
+    glow(px, py, 7 * unit, KIT, 0.35 * ui)
+    disc(px, py, 1.8 * unit, KIT, 0.9 * ui)
   }
 
   function build(sim: Sim, frameDt: number) {
@@ -293,6 +393,14 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
       disc(x, y, (0.45 + st.s * 1.0) * S, st.c, a, true)
       if (st.s > 0.5) glow(x, y, 7 * S * st.s, st.c, a * 0.14)
       if (st.depth > 0.1) flare(x, y, 9 * S, 0.45 * S, st.c, a * 0.35)
+    }
+
+    // tilt: a slow breathing pitch and yaw, flattening for the end card's star map
+    {
+      const endE = smoother(clamp01((t - sim.warp.end) / 2.5))
+      const pitch = (0.2 + 0.045 * Math.sin(t * 0.045)) * (1 - endE) * intro
+      const yaw = 0.075 * Math.sin(t * 0.031 + 1) * (1 - endE) * intro
+      Object.assign(tilt, { on: true, cx: width / 2, cy: height / 2, cp: Math.cos(pitch), sp: Math.sin(pitch), cy_: Math.cos(yaw), sy: Math.sin(yaw), f: height * 1.5, blur: 2.2 * u * (1 - endE) })
     }
 
     const nodes = sim.nodes, hubs = sim.hubs
@@ -430,7 +538,8 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
       if (age >= life) continue
       const k = age / life
       const a = Math.pow(1 - k, 1.6)
-      const c = mix(hubs[sim.shub[i]!]!.color, WHITE, 0.45)
+      const kind = sim.skind[i]!
+      const c = mix(TOOL_COLORS[kind] ?? WHITE, hubs[sim.shub[i]!]!.color, 0.25)
       const x = sx(sim.sx[i]!), y = sy(sim.sy[i]!)
       const s = sim.ssize[i]! * Math.pow(z, 0.45) * S
       glow(x, y, s * 4.5, c, 0.2 * a)
@@ -442,6 +551,12 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
           break
         }
         case 3: ring(x, y, s * 1.3, 0.5 * S, c, 0.9 * a); break
+        case 4: { // delegate: a little pair, a parent and its satellite
+          const ang = sim.sage[i]! * 6 + i
+          disc(x, y, s * 0.8, c, 0.9 * a, true)
+          disc(x + Math.cos(ang) * s * 2.2, y + Math.sin(ang) * s * 2.2, s * 0.45, c, 0.8 * a, true)
+          break
+        }
         default: disc(x, y, s * (1 - k * 0.5), c, 0.9 * a, true)
       }
     }
@@ -508,8 +623,11 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
 
     // a soft dark scrim behind the clock and counters keeps them legible over busy clusters
     {
+      const was = tilt.on
+      tilt.on = false
       const [x0, y0, x1, y1] = hud.rect
       push((x0 + x1) * 0.35, (y0 + y1) * 0.5, 0, 0, Math.max(x1 - x0, y1 - y0) * 0.95, 0, 0, 1, [0.004, 0.005, 0.012], 0.6 * (1 - clamp01((t - sim.warp.end) / 1.2)))
+      tilt.on = was
     }
 
     // ---- overlay: everything below draws after tonemapping
@@ -521,7 +639,7 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
     // label tries below, above, right and left of its cluster, stays inside the frame, and
     // fades out rather than overlap another label or a session.
     const M = 22 * unit
-    const placed: [number, number, number, number][] = [hud.rect] // clock and counters
+    const placed: [number, number, number, number][] = [hud.rect, [0, height - 46 * unit, width, height]] // clock, counters, strip
     const mom = sim.moment()
     const bodies: [number, number, number][] = []
     for (const n of nodes) if (n.alive && n.root) bodies.push([sx(n.x), sy(n.y), n.r * bodyScale + 3 * S])
@@ -588,7 +706,7 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
       const lift = mom.m && mom.m.cluster === i ? mom.e : 0
       const ta = visible || lift > 0.05 ? Math.max((0.3 + 0.65 * clamp01(imp)) * zoomFade, 0.75 * outro, lift) * born : 0
       st.a = Math.max(0, st.a + (ta - st.a) * 0.14)
-      text(h.label, st.x, st.y, px * (1 + 0.12 * lift), mix(h.color, WHITE, 0.6 + 0.3 * lift), st.a, { weight: lift > 0.5 ? 600 : 500, align: "center", tracking: 0.3 * S })
+      text(h.label, st.x, st.y, px * (1 + 0.12 * lift), mix(h.color, WHITE, 0.6 + 0.3 * lift), st.a, { weight: lift > 0.5 ? 600 : 500, align: "center", tracking: 0.3 * S, atlasPx: px })
     }
 
     if (opts.titles) {
@@ -601,6 +719,9 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
       }
     }
 
+    drawDrifts(sim)
+    tilt.on = false
+    drawStrip(sim)
     drawHud(sim, frameDt)
 
     return { count: counts[0]!, overCount: counts[1]!, cam, sky }
