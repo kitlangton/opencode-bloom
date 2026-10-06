@@ -43,6 +43,18 @@ Flags:
 - `--no-audio`
 - `--start` / `--end` render a sub-range of seconds.
 
+## What's on screen
+
+- **Clock and counters:** an odometer clock and three counters (sessions, subagents, messages). They use Psychopomp's `settle` spring, carry right to left a beat apart, and blur with speed.
+- **Sky:** the background follows the log's real clock: night, indigo pre-dawn, warm dawn, a cool dark day, amber dusk, then night again.
+- **Camera moments:** the most significant subagent bursts (3+ from one parent within 4 minutes) slow the time warp. The camera eases out, then in, and the project's label lifts.
+- **Kit:** a warm comet that flies an arc to each session he prompts. Parent-to-subagent and cross-project prompts are cooler, dimmer comets.
+- **Tool sparks:** one glyph and color per kind (read, edit, shell, web, delegate). Edited file names drift off sessions, heavily rate-limited.
+- **Session life cycle:** idle sessions cool, and finished subagents stop orbiting.
+- **Tilt:** a slow 3D tilt with shallow depth of field that flattens for the end card.
+- **Activity strip:** messages per minute along the bottom, with a playhead.
+- **End card:** the counters roll up to the day's totals and the camera holds on the full map.
+
 ## Sound
 
 `audio/score.ts` replays the simulation and camera. It turns events into notes and pans each one by the node's x position on screen. `audio/synth.ts` renders the result.
@@ -52,6 +64,8 @@ Flags:
 - **Kit's prompts:** soft felt notes.
 - **Cross-session prompts:** filtered air that sweeps across the stereo field and lands on an FM bell.
 - **Messages and tools:** never individual clicks. Their density drives a tuned granular texture.
+- **Comet arrivals:** Kit's land as felt notes, agent comets as faint glints, cross-project ones as a bell.
+- **Counters:** odometer ticks, soft and capped. Camera moments get a slow swell. The end card gets a rising run of ticks and a closing chord.
 - **Pad:** a warm I–vi–IV–V that breathes with overall activity and resolves home in the outro.
 
 Busy moments duck the pad and the texture. Everything feeds a Freeverb send, then a soft limiter. The mux step normalizes to -16 LUFS integrated with a true peak of -1.5 dBTP.
