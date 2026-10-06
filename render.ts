@@ -25,6 +25,7 @@ const { values: a } = parseArgs({
     crf: { type: "string", default: "14" },
     serve: { type: "boolean", default: false },
     port: { type: "string", default: "8517" },
+    audio: { type: "boolean", default: true },
   },
 })
 
@@ -135,8 +136,31 @@ if (a.serve) {
   if (ffmpeg) {
     await (ffmpeg.stdin as import("bun").FileSink).end()
     await ffmpeg.exited
+    if (a.audio) await addScore(resolve(a.out!))
     console.log("wrote", a.out)
   }
   server.stop(true)
   process.exit(0)
+}
+
+// Synthesizes the score from the same simulation and muxes it in, loudness-normalized
+// (two-pass EBU R128 to -16 LUFS integrated, -1.5 dBTP).
+async function addScore(video: string) {
+  const wav = video.replace(/\.mp4$/, ".score.wav")
+  const run = async (cmd: string[]) => {
+    const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" })
+    const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()])
+    if ((await p.exited) !== 0) throw new Error(`${cmd[0]} failed: ${err.slice(-2000)}`)
+    return out + err
+  }
+  await run(["bun", join(root, "audio/score.ts"), "--data", a.data!, "--duration", a.duration!, "--width", a.width!, "--height", a.height!, "--fps", a.fps!, "--out", wav])
+  const target = "I=-16:TP=-1.5:LRA=11"
+  const measure = await run(["ffmpeg", "-hide_banner", "-nostats", "-i", wav, "-af", `loudnorm=${target}:print_format=json`, "-f", "null", "-"])
+  const m = JSON.parse(measure.slice(measure.lastIndexOf("{"), measure.lastIndexOf("}") + 1))
+  const norm = `loudnorm=${target}:measured_I=${m.input_i}:measured_TP=${m.input_tp}:measured_LRA=${m.input_lra}:measured_thresh=${m.input_thresh}:offset=${m.target_offset}:linear=true`
+  const tmp = video.replace(/\.mp4$/, ".mux.mp4")
+  await run(["ffmpeg", "-loglevel", "error", "-y", "-i", video, "-i", wav, "-map", "0:v", "-map", "1:a", "-c:v", "copy",
+    "-af", `${norm},aresample=48000`, "-c:a", "aac", "-b:a", "256k", "-shortest", "-movflags", "+faststart", tmp])
+  await run(["mv", tmp, video])
+  await run(["rm", wav])
 }
