@@ -1,17 +1,18 @@
 #!/usr/bin/env bun
-import { Database } from "bun:sqlite"
-import { existsSync, mkdtempSync, mkdirSync, rmSync } from "node:fs"
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { tmpdir } from "node:os"
 import { fileURLToPath } from "node:url"
 import ffmpeg from "@ffmpeg-installer/ffmpeg"
 import { parseOptions } from "../cli/options"
+import { validateDatabase } from "../cli/database"
 import type { EventLog } from "../shared/events"
 import pkg from "../package.json"
 
 const HELP = `opencode-bloom [options]
 
 Render yesterday's local OpenCode V2 activity as an MP4.
+Requires OpenCode V2: https://opencode.ai/v2/docs/
 
   --date YYYY-MM-DD   Day to render (local timezone; default: yesterday)
   --quality 4k       Native 4K export (default: 1080p)
@@ -49,12 +50,7 @@ try {
   if (opts.mode === "help") console.log(HELP)
   else if (opts.mode === "version") console.log(pkg.version)
   else {
-    if (!existsSync(opts.db)) throw new Error(`OpenCode database not found: ${opts.db}. Set --db to your OpenCode V2 database.`)
-    const db = new Database(opts.db, { readonly: true })
-    try {
-      if (!db.query("select name from sqlite_master where type='table' and name='session_v2'").get())
-        throw new Error("This release requires OpenCode V2 history (session_v2). This database uses a different schema.")
-    } finally { db.close() }
+    validateDatabase(opts.db)
     const tempRoot = join(tmpdir(), "opencode")
     mkdirSync(tempRoot, { recursive: true })
     temp = mkdtempSync(join(tempRoot, "bloom-"))

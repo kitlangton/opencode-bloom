@@ -1,6 +1,6 @@
 {
   "name": "opencode-bloom",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Render a day of local OpenCode V2 sessions as an animated MP4.",
   "type": "module",
   "license": "MIT",

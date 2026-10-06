@@ -17,6 +17,20 @@ try {
   await Bun.write(join(root, "package.json"), JSON.stringify({ name: "bloom-consumer-proof", private: true }))
   await run([process.execPath, "add", tar])
   await run([process.execPath, "x", "--no-install", "opencode-bloom", "--help"])
+  const legacy = join(root, "legacy.db")
+  const legacyDb = new Database(legacy)
+  legacyDb.exec("create table session (id text)")
+  legacyDb.close()
+  const invalid = join(root, "invalid.db")
+  await Bun.write(invalid, "not a SQLite database")
+  for (const db of [join(root, "missing.db"), legacy, invalid]) {
+    const p = Bun.spawn([process.execPath, "x", "--no-install", "opencode-bloom", "--db", db],
+      { cwd: root, stdout: "pipe", stderr: "pipe" })
+    const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()])
+    if (await p.exited !== 1 || !err.includes("Bloom requires OpenCode V2 history") || !err.includes("https://opencode.ai/v2/docs/") || out.includes("Chromium"))
+      throw new Error(`Missing actionable database warning for ${db}`)
+  }
+  console.log("PASS: installed CLI rejects missing, V1 and invalid databases with the V2 installation link.")
   const dbPath = join(root, "fixture.db")
   const db = new Database(dbPath)
   const start = new Date(2026, 9, 5).getTime()

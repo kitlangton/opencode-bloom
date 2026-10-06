@@ -24,6 +24,8 @@ The first run downloads Playwright's Chromium into its browser cache. FFmpeg com
 
 Requirements: Bun 1.3+, an OpenCode **V2** database, and a working WebGPU-capable GPU. macOS is tested; Linux and Windows rendering is experimental and may require additional browser system libraries or GPU drivers. This release does not read V1 history.
 
+If the database is missing, unreadable or incompatible, Bloom stops before downloading Chromium or rendering and links to the [OpenCode V2 installation guide](https://opencode.ai/v2/docs/). If you already use V2 with a different database path, pass `--db /path/to/opencode.db`. Bloom never migrates or modifies your database.
+
 ```sh
 bunx opencode-bloom --help
 bunx opencode-bloom --date 2026-10-05 --out day.mp4 --label alice
