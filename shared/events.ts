@@ -42,6 +42,8 @@ export interface EventLog {
   sessions: SessionNode[]
   /** basenames of edited files (public-safe: no directories, no secrets-looking names) */
   files?: string[]
+  /** [ms since meta.from, positive USD recorded on one assistant message]; never invoice totals. */
+  costs?: [number, number][]
   /** [ms since meta.from, EV type, session index, extra] */
   events: [number, number, number, number][]
 }

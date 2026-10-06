@@ -2,7 +2,7 @@
 import { FLOATS } from "./shaders"
 import { MAX_QUADS, MAX_OVERLAY } from "./gpu"
 import { COOL, KIT, STEP, arc, rng, type RGB, type Sim } from "./sim"
-import { Clock, Counter, type Column } from "./rolling"
+import { Clock, Counter, MoneyCounter, type Column } from "./rolling"
 import { Sky } from "./sky"
 import type { Atlas } from "./text"
 
@@ -106,7 +106,7 @@ export class Camera {
   get zoom() { return Math.exp(this.lz) }
 }
 
-export interface SceneOptions { titles: boolean; dateLabel: (ms: number) => string; timeLabel: (ms: number) => string; hourOf: (ms: number) => number }
+export interface SceneOptions { titles: boolean; recordedCost?: boolean; label?: string; dateLabel: (ms: number) => string; timeLabel: (ms: number) => string; hourOf: (ms: number) => number }
 
 export function createScene(width: number, height: number, atlas: Atlas, opts: SceneOptions) {
   const unit = height / 1080 // resolution scale; layout is authored at 1080 p
@@ -204,6 +204,7 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
     { label: "SESSIONS", key: "sessions" as const, c: new Counter(0.5, 0.06) },
     { label: "SUBAGENTS", key: "subagents" as const, c: new Counter(0.5, 0.06) },
     { label: "MESSAGES", key: "messages" as const, c: new Counter(0.5, 0.06) },
+    ...(opts.recordedCost ? [{ label: "RECORDED COST", key: "cost" as const, c: new MoneyCounter(0.5, 0.06) }] : []),
   ]
   let spun = false
   let lastRead = -1
@@ -242,15 +243,18 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
     const [hh, mm] = opts.timeLabel(real).split(":").map(Number) as [number, number]
     clock.set(t, hh, mm)
     // counters take a new reading ten times a second: a steady odometer cadence
-    if (t - lastRead >= 0.1 || t > sim.warp.end) { lastRead = t; for (const k of counters) k.c.set(t, sim.counts[k.key]) }
+    if (t - lastRead >= 0.1 || t > sim.warp.end) { lastRead = t; for (const k of counters)
+      k.c.set(t, k.key === "cost" ? Math.round(sim.recordedCostUSD * 100) : sim.counts[k.key]) }
 
     text(opts.dateLabel(real), L, T, 15 * unit, [0.8, 0.84, 0.95], 0.55 * ui, { weight: 500, tracking: 1.2 * unit, snap: true })
     const px = 40 * unit
     const adv = digitAdvance(px, 300)
     const ink: RGB = [0.93, 0.95, 1]
     const base = T + 44 * unit
-    const cw = clock.hour.sample(t)
-    reel({ x: 0, glyphs: cw.glyphs, smear: cw.smear, opacity: 1, rise: 0, velocity: cw.velocity }, L + adv, base, px, ink, 0.92 * ui, 300)
+    for (const [i, wheel] of [clock.hourTens, clock.hourOnes].entries()) {
+      const cw = wheel.sample(t)
+      reel({ x: 0, glyphs: cw.glyphs, smear: cw.smear, opacity: 1, rise: 0, velocity: cw.velocity }, L + adv * (0.5 + i), base, px, ink, 0.92 * ui, 300)
+    }
     text(":", L + adv * 2.21, base, px, ink, 0.92 * ui, { weight: 300, align: "center", snap: true })
     const tw = clock.tens.sample(t), ow = clock.ones.sample(t)
     reel({ x: 0, glyphs: tw.glyphs, smear: tw.smear, opacity: 1, rise: 0, velocity: tw.velocity }, L + adv * 2.92, base, px, ink, 0.92 * ui, 300)
@@ -266,8 +270,8 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
     const cpx = (19 + 15 * e) * unit
     const lpx = (10 + 2 * e) * unit
     const cadv = digitAdvance(34 * unit, 400) * (cpx / Math.round(34 * unit))
-    const gapSmall = 30 * unit, gapBig = 70 * unit
-    const widths = counters.map((k) => Math.max(k.c.width(t) * cadv, measure(k.label, 12 * unit, 600, 1.4 * unit) * (lpx / Math.round(12 * unit))))
+    const gapSmall = 24 * unit, gapBig = 50 * unit
+    const widths = counters.map((k) => Math.max((k.c.width(t) + (k.key === "cost" ? 0.85 : 0)) * cadv, measure(k.label, 12 * unit, 600, 1.4 * unit) * (lpx / Math.round(12 * unit))))
     const gap = gapSmall + (gapBig - gapSmall) * e
     const rowW = widths.reduce((a, b) => a + b, 0) + gap * (counters.length - 1)
     const x0a = L, y0a = T + 100 * unit
@@ -278,8 +282,13 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
     const ca = 0.85 * clamp01((t - 0.6) / 0.8)
     counters.forEach((k, i) => {
       const { columns, commas } = k.c.sample(t)
-      for (const col of columns) reel(col, x + (col.x + 0.5) * cadv, y, cpx, ink, ca, 400, 34 * unit)
-      for (const cm of commas) text(",", x + cm.x * cadv, y, cpx, ink, ca * cm.opacity, { weight: 400, align: "center", atlasPx: 34 * unit })
+      const nx = x + (k.key === "cost" ? 0.85 * cadv : 0)
+      if (k.c instanceof MoneyCounter) {
+        text("$", x + 0.35 * cadv, y, cpx, ink, ca, { weight: 400, align: "center", atlasPx: 34 * unit })
+        text(".", nx + k.c.sample(t).decimalX * cadv, y, cpx, ink, ca, { weight: 400, align: "center", atlasPx: 34 * unit })
+      }
+      for (const col of columns) reel(col, nx + (col.x + 0.5) * cadv, y, cpx, ink, ca, 400, 34 * unit)
+      for (const cm of commas) text(",", nx + cm.x * cadv, y, cpx, ink, ca * cm.opacity, { weight: 400, align: "center", atlasPx: 34 * unit })
       text(k.label, x, y + (16 + 8 * e) * unit, lpx, [0.72, 0.77, 0.9], 0.5 * ca, { weight: 600, tracking: 1.4 * unit, atlasPx: 12 * unit })
       x += widths[i]! + gap
     })
@@ -633,7 +642,7 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
     // ---- overlay: everything below draws after tonemapping
     layer = 1
     const endFade = 1 - clamp01((t - sim.warp.end) / 1.2)
-    if (av.alive) text("kit", sx(av.x) + 9 * S, sy(av.y) - 8 * S, 13 * S, KIT, 0.8 * endFade, { weight: 600, tracking: 0.5 * S })
+    if (av.alive) text(opts.label ?? "you", sx(av.x) + 9 * S, sy(av.y) - 8 * S, 13 * S, KIT, 0.8 * endFade, { weight: 600, tracking: 0.5 * S })
 
     // Project labels caption their constellation. Busier, bigger projects place first; each
     // label tries below, above, right and left of its cluster, stays inside the frame, and

@@ -5,9 +5,10 @@
 //   bun render.ts --serve   (open the live preview in a browser)
 import { parseArgs } from "node:util"
 import { mkdirSync } from "node:fs"
-import { dirname, join, resolve } from "node:path"
+import { dirname, join, resolve, isAbsolute } from "node:path"
 import { chromium } from "playwright"
 import index from "./web/index.html"
+import { normalizeAndMux } from "./audio/mux"
 
 const { values: a } = parseArgs({
   options: {
@@ -23,6 +24,10 @@ const { values: a } = parseArgs({
     start: { type: "string" },
     end: { type: "string" },
     crf: { type: "string", default: "14" },
+    threads: { type: "string", default: "2" },
+    ffmpeg: { type: "string", default: "ffmpeg" },
+    label: { type: "string", default: "you" },
+    "no-cost": { type: "boolean", default: false },
     serve: { type: "boolean", default: false },
     port: { type: "string", default: "8517" },
     audio: { type: "boolean", default: true },
@@ -32,23 +37,29 @@ const { values: a } = parseArgs({
 
 const W = Number(a.width), H = Number(a.height), FPS = Number(a.fps)
 const root = import.meta.dir
+const dataPath = isAbsolute(a.data!) ? a.data! : join(root, "data", a.data!)
+const encoder = a.ffmpeg!
 let ffmpeg: ReturnType<typeof Bun.spawn> | null = null
+let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined
+const subprocesses = new Set<ReturnType<typeof Bun.spawn>>()
 let received = 0
 const stillsAt = (a.stills ?? "").split(",").filter(Boolean).map((s) => Math.round(Number(s) * FPS))
 const stillDir = resolve(a["still-dir"]!)
 
 async function writePng(px: Uint8Array, file: string) {
   mkdirSync(dirname(file), { recursive: true })
-  const p = Bun.spawn(["ffmpeg", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", `${W}x${H}`, "-i", "-", "-frames:v", "1", file], { stdin: "pipe" })
+  const p = Bun.spawn([encoder, "-loglevel", "error", "-y", "-probesize", "32", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", `${W}x${H}`, "-i", "-", "-frames:v", "1", file], { stdin: "pipe" })
   p.stdin.write(px)
+  await p.stdin.flush()
   await p.stdin.end()
-  await p.exited
+  if ((await p.exited) !== 0) throw new Error(`PNG encoding failed: ${file}`)
 }
 
 // Frames arrive over one WebSocket (ordered, far cheaper than a POST per frame).
 let sinkChain: Promise<unknown> = Promise.resolve()
 const server = Bun.serve({
   port: Number(a.port),
+  hostname: "127.0.0.1",
   fetch(req, srv) {
     if (new URL(req.url).pathname === "/ws" && srv.upgrade(req)) return
     return new Response("not found", { status: 404 })
@@ -77,7 +88,7 @@ const server = Bun.serve({
   development: false,
   routes: {
     "/": index,
-    "/data/:file": (req) => new Response(Bun.file(join(root, "data", req.params.file))),
+    "/data/events.json": () => new Response(Bun.file(dataPath)),
     "/still": {
       POST: async (req) => {
         const f = Number(new URL(req.url).searchParams.get("f"))
@@ -90,34 +101,57 @@ const server = Bun.serve({
   },
 })
 
-const params = new URLSearchParams({ w: String(W), h: String(H), fps: String(FPS), duration: a.duration!, data: a.data! })
+let closing: Promise<void> | undefined
+function cleanup() {
+  return closing ??= (async () => {
+    for (const p of subprocesses) if (p.exitCode === null) p.kill()
+    if (ffmpeg?.exitCode === null) ffmpeg.kill()
+    await browser?.close().catch(() => {})
+    server.stop(true)
+  })()
+}
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]] as const) process.on(signal, () => {
+  process.exitCode = code
+  void cleanup()
+})
+
+const params = new URLSearchParams({ w: String(W), h: String(H), fps: String(FPS), duration: a.duration!, data: "events.json", label: a.label! })
 if (a.titles) params.set("titles", "")
+if (a["no-cost"]) params.set("no-cost", "")
 
 if (a.serve) {
   console.log(`preview: http://localhost:${server.port}/?${params}`)
 } else {
+  try {
   params.set("capture", "")
   if (a.out) {
     mkdirSync(dirname(resolve(a.out)), { recursive: true })
     ffmpeg = Bun.spawn([
-      "ffmpeg", "-loglevel", "error", "-y",
+      encoder, "-loglevel", "error", "-y",
       "-f", "rawvideo", "-pix_fmt", "yuv420p", "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
       "-s", `${W}x${H}`, "-r", String(FPS), "-i", "-",
-      "-c:v", "libx264", "-preset", "slow", "-crf", a.crf!, "-pix_fmt", "yuv420p",
+      "-c:v", "libx264", "-threads", a.threads!, "-preset", "slow", "-crf", a.crf!, "-pix_fmt", "yuv420p",
       "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
       "-x264-params", "aq-mode=3:aq-strength=0.9", "-movflags", "+faststart",
       resolve(a.out),
     ], { stdin: "pipe", stdout: "inherit", stderr: "inherit" })
   }
-  const browser = await chromium.launch({
+  browser = await chromium.launch({
     headless: true,
-    args: ["--enable-gpu", "--enable-unsafe-webgpu", "--use-angle=metal", "--ignore-gpu-blocklist", "--disable-gpu-sandbox"],
+    args: ["--enable-gpu", "--enable-unsafe-webgpu", "--ignore-gpu-blocklist",
+      ...(process.platform === "darwin" ? ["--use-angle=metal"] : process.platform === "win32" ? ["--use-angle=d3d11"] : ["--use-angle=vulkan", "--enable-features=Vulkan"])],
   })
   const page = await browser.newPage({ viewport: { width: 800, height: 600 } })
   page.on("pageerror", (e) => console.error("pageerror", e.message))
   page.on("console", (m) => { if (m.type() === "error" || m.type() === "warning") console.error("console", m.text()) })
   await page.goto(`http://localhost:${server.port}/?${params}`)
-  await page.waitForFunction(() => (window as any).__ready, null, { timeout: 60_000 })
+  let pageFailure: string | undefined
+  page.on("pageerror", (e) => { pageFailure = e.message })
+  try {
+    await page.waitForFunction(() => (window as any).__ready, null, { timeout: 60_000 })
+  } catch (error) {
+    throw new Error(pageFailure ?? `The renderer could not start. A WebGPU-capable GPU and drivers are required. ${error}`)
+  }
   const info = await page.evaluate(() => (window as any).__info)
   console.log("frames", info.totalFrames, info.stats)
   const t0 = performance.now()
@@ -136,12 +170,16 @@ if (a.serve) {
   await browser.close()
   if (ffmpeg) {
     await (ffmpeg.stdin as import("bun").FileSink).end()
-    await ffmpeg.exited
+    if ((await ffmpeg.exited) !== 0) throw new Error("Video encoding failed")
     if (a.audio && !a["no-audio"]) await addScore(resolve(a.out!))
     console.log("wrote", a.out)
   }
-  server.stop(true)
-  process.exit(0)
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error)
+    process.exitCode ||= 1
+  } finally {
+    await cleanup()
+  }
 }
 
 // Synthesizes the score from the same simulation and muxes it in, loudness-normalized
@@ -150,18 +188,13 @@ async function addScore(video: string) {
   const wav = video.replace(/\.mp4$/, ".score.wav")
   const run = async (cmd: string[]) => {
     const p = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" })
+    subprocesses.add(p)
     const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()])
-    if ((await p.exited) !== 0) throw new Error(`${cmd[0]} failed: ${err.slice(-2000)}`)
+    const code = await p.exited
+    subprocesses.delete(p)
+    if (code !== 0) throw new Error(`${cmd[0]} failed: ${err.slice(-2000)}`)
     return out + err
   }
-  await run(["bun", join(root, "audio/score.ts"), "--data", a.data!, "--duration", a.duration!, "--width", a.width!, "--height", a.height!, "--fps", a.fps!, "--out", wav])
-  const target = "I=-16:TP=-1.5:LRA=11"
-  const measure = await run(["ffmpeg", "-hide_banner", "-nostats", "-i", wav, "-af", `loudnorm=${target}:print_format=json`, "-f", "null", "-"])
-  const m = JSON.parse(measure.slice(measure.lastIndexOf("{"), measure.lastIndexOf("}") + 1))
-  const norm = `loudnorm=${target}:measured_I=${m.input_i}:measured_TP=${m.input_tp}:measured_LRA=${m.input_lra}:measured_thresh=${m.input_thresh}:offset=${m.target_offset}:linear=true`
-  const tmp = video.replace(/\.mp4$/, ".mux.mp4")
-  await run(["ffmpeg", "-loglevel", "error", "-y", "-i", video, "-i", wav, "-map", "0:v", "-map", "1:a", "-c:v", "copy",
-    "-af", `${norm},aresample=48000`, "-c:a", "aac", "-b:a", "256k", "-shortest", "-movflags", "+faststart", tmp])
-  await run(["mv", tmp, video])
-  await run(["rm", wav])
+   await run([process.execPath, join(root, "audio/score.ts"), "--data", dataPath, "--duration", a.duration!, "--width", a.width!, "--height", a.height!, "--fps", a.fps!, "--out", wav])
+  await normalizeAndMux(video, wav, encoder, run)
 }

@@ -1,20 +1,53 @@
 {
-  "name": "session-bloom",
+  "name": "opencode-bloom",
+  "version": "0.1.0",
+  "description": "Render a day of local OpenCode V2 sessions as an animated MP4.",
   "type": "module",
-  "private": true,
+  "license": "MIT",
+  "author": "Kit Langton",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kitlangton/opencode-bloom.git"
+  },
+  "homepage": "https://github.com/kitlangton/opencode-bloom#readme",
+  "bugs": {
+    "url": "https://github.com/kitlangton/opencode-bloom/issues"
+  },
+  "bin": {
+    "opencode-bloom": "bin/opencode-bloom.ts"
+  },
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "files": [
+    "bin/opencode-bloom.ts",
+    "cli/*.ts",
+    "!cli/*.test.ts",
+    "render.ts",
+    "extract/extract.ts",
+    "shared/*.ts",
+    "web/*.ts",
+    "!web/*.test.ts",
+    "web/index.html",
+    "audio/*.ts",
+    "!audio/*.test.ts"
+  ],
   "scripts": {
     "extract": "bun extract/extract.ts",
     "render": "bun render.ts",
     "preview": "bun render.ts --serve",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "prepublishOnly": "bun run typecheck && bun run test"
   },
   "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "1.1.0",
+    "playwright": "1.63.0",
     "vgpu": "0.5.0"
   },
   "devDependencies": {
     "@types/bun": "^1.4.2",
     "@webgpu/types": "^0.1.74",
-    "playwright": "1.63.0",
     "typescript": "^7.0.2"
   }
 }

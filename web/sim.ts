@@ -95,6 +95,8 @@ export class Sim {
   private lastDrift = -1e9
   private lastDriftBy = new Map<number, number>()
   counts = { sessions: 0, subagents: 0, messages: 0 }
+  recordedCostUSD = 0
+  private nextCost = 0
   pulses: Pulse[] = []
   // Sparks live in flat arrays: x, y, vx, vy, age, life, size, node-color index.
   sx = new Float32Array(MAX_SPARKS); sy = new Float32Array(MAX_SPARKS)
@@ -361,6 +363,11 @@ export class Sim {
     const dt = STEP
     this.time += dt
     const t = this.time
+    const costs = this.log.costs ?? []
+    const real = this.warp.toReal(t)
+    while (t >= this.warp.start && this.nextCost < costs.length && costs[this.nextCost]![0] <= real) {
+      this.recordedCostUSD += costs[this.nextCost++]![1]
+    }
     const events = this.log.events
     while (this.next < events.length && this.eventTimes[this.next]! <= t) {
       const e = events[this.next++]!

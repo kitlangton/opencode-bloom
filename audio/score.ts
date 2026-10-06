@@ -3,7 +3,7 @@
 //   bun audio/score.ts --data events-2026-10-05.json --duration 75 --width 1920 --height 1080 --out out/x.wav
 import { parseArgs } from "node:util"
 import { writeFileSync, mkdirSync } from "node:fs"
-import { dirname, join } from "node:path"
+import { dirname, join, isAbsolute } from "node:path"
 import { EV, type EventLog } from "../shared/events"
 import { Sim } from "../web/sim"
 import { createScene } from "../web/scene"
@@ -21,7 +21,7 @@ const { values: a } = parseArgs({
 })
 
 const W = Number(a.width), H = Number(a.height), FPS = Number(a.fps), D = Number(a.duration)
-const log: EventLog = await Bun.file(join(import.meta.dir, "../data", a.data!)).json()
+const log: EventLog = await Bun.file(isAbsolute(a.data!) ? a.data! : join(import.meta.dir, "../data", a.data!)).json()
 const sim = new Sim(log, { duration: D, outro: D >= 60 ? 7 : 5 })
 // Text is irrelevant to sound; a stub atlas lets the scene (and so the camera) run headless.
 const atlas: any = { get: (s: string, px: number) => ({ uv: [0, 0, 1, 1], w: s.length * px * 0.6 + 4, h: px * 1.4, ascent: px }), pad: () => 2, takeDirty: () => false }

@@ -40,6 +40,8 @@ const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 const scene = createScene(width, height, atlas, {
   titles,
+  recordedCost: log.costs !== undefined && !q.has("no-cost"),
+  label: q.get("label") ?? "you",
   dateLabel: (ms) => {
     const d = local(ms)
     return `${DAYS[d.getUTCDay()]} ${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`.toUpperCase()

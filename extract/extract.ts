@@ -18,12 +18,12 @@ const { values: args } = parseArgs({
   },
 })
 
-const day = (s: string) => {
+const day = (s: string, offset = 0) => {
   const [y, m, d] = s.split("-").map(Number)
-  return new Date(y!, m! - 1, d!).getTime()
+  return new Date(y!, m! - 1, d! + offset).getTime()
 }
 const from = day(args.from!)
-const to = day(args.to ?? args.from!) + 86_400_000
+const to = day(args.to ?? args.from!, 1)
 const out = args.out ?? `data/events-${args.from}${args.to ? `_${args.to}` : ""}${args.titles ? ".private" : ""}.json`
 
 const db = new Database(args.db, { readonly: true })
@@ -43,16 +43,19 @@ const isDenied = (s: string) => !!denyRe && new RegExp(denyRe.source, "i").test(
 const scrub = (s: string) => (denyRe ? s.replace(denyRe, "•••") : s)
 
 // ---- messages in window
-type Row = { sid: string; type: string; t: number; origin: string | null; streamed: number | null; completed: number | null; tools: string | null; files: string | null }
+type Row = { sid: string; type: string; t: number; origin: string | null; streamed: number | null; completed: number | null; cost: number | null; tools: string | null; files: string | null }
 const rows = db.query<Row, [number, number]>(`
   select m.session_id sid, m.type type, m.time_created t,
     case when m.type='user' then json_extract(m.data,'$.metadata."anomaly.session".originSessionID') end origin,
     case when m.type='assistant' then json_extract(m.data,'$.time.streamed') end streamed,
     case when m.type='assistant' then json_extract(m.data,'$.time.completed') end completed,
+    case when m.type='assistant' then json_extract(m.data,'$.cost') end cost,
     case when m.type='assistant' then (select json_group_array(json_extract(c.value,'$.name')) from json_each(m.data,'$.content') c where json_extract(c.value,'$.type')='tool') end tools,
     case when m.type='assistant' then (select json_group_array(coalesce(json_extract(c.value,'$.state.input.filePath'), json_extract(c.value,'$.state.input.path'), '')) from json_each(m.data,'$.content') c where json_extract(c.value,'$.type')='tool') end files
   from session_message m
+  join session_v2 s on s.id = m.session_id
   where m.time_created >= ? and m.time_created < ? and m.type in ('user','assistant')
+    and (s.fork_session_id is null or m.time_created >= s.time_created)
   order by m.time_created`).all(from, to)
 
 type S = { id: string; parent_id: string | null; directory: string; project_id: string; title: string | null; time_created: number }
@@ -181,6 +184,10 @@ for (const r of rows) {
 events.sort((x, y) => x[0] - y[0] || x[1] - y[1])
 
 const count = (type: number) => events.filter((e) => e[1] === type).length
+const costs: [number, number][] = rows
+  .filter((r) => r.type === "assistant" && Number.isFinite(r.cost) && r.cost! > 0)
+  .map((r) => [Math.min(to - 1, Math.max(r.t, r.completed ?? r.t)) - from, r.cost!] as [number, number])
+  .sort((a, b) => a[0] - b[0])
 const log: EventLog = {
   meta: {
     from,
@@ -197,11 +204,14 @@ const log: EventLog = {
       assistantMessages: count(EV.assistant),
       toolCalls: count(EV.tool),
       clusters: clusters.length,
+      recordedCostUSD: costs.reduce((sum, [, usd]) => sum + usd, 0),
+      unpricedMessages: rows.filter((r) => r.type === "assistant" && r.cost === null).length,
     },
   },
   clusters,
   sessions: nodes,
   files,
+  costs,
   events: events.map(([t, type, n, x]) => [t - from, type, n, x]),
 }
 

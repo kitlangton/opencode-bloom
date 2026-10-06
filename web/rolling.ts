@@ -90,7 +90,7 @@ export class Counter {
 
   set(t: number, value: number) {
     if (value === this.value) return
-    const s = String(Math.max(0, Math.floor(value)))
+    const s = this.digits(Math.max(0, Math.floor(value)))
     let rank = 0
     for (let i = 0; i < s.length; i++) {
       const d = Number(s[s.length - 1 - i])
@@ -114,7 +114,9 @@ export class Counter {
   }
 
   /** x of place i (0 = ones) in digit advances, measured from the left of the number. */
-  private slot(i: number, len: number) {
+  protected digits(value: number) { return String(value) }
+
+  protected slot(i: number, len: number) {
     const lead = len - 1 - i
     const commasBefore = Math.floor((len - 1) / 3) - Math.floor(i / 3)
     return lead + commasBefore * 0.42
@@ -146,9 +148,10 @@ export class Counter {
   }
 }
 
-/** HH:MM with an hour reel of 24 faces, a tens-of-minutes reel of 6 and a ones reel of 10. */
+/** HH:MM: each digit has its own reel, and only changed faces move. */
 export class Clock {
-  readonly hour = new Wheel(Array.from({ length: 24 }, (_, h) => String(h).padStart(2, "0")), 0)
+  readonly hourTens = new Wheel("012".split(""), 0)
+  readonly hourOnes = new Wheel(DIGITS, 0)
   readonly tens = new Wheel("012345".split(""), 0)
   readonly ones = new Wheel(DIGITS, 0)
   private last = -1
@@ -159,7 +162,8 @@ export class Clock {
     const key = hh * 60 + mm
     if (key === this.last) return
     if (this.last < 0) {
-      this.hour.pos.to(t, hh, 0); this.tens.pos.to(t, Math.floor(mm / 10), 0); this.ones.pos.to(t, mm % 10, 0)
+      this.hourTens.pos.to(t, Math.floor(hh / 10), 0); this.hourOnes.pos.to(t, hh % 10, 0)
+      this.tens.pos.to(t, Math.floor(mm / 10), 0); this.ones.pos.to(t, mm % 10, 0)
       this.last = key
       return
     }
@@ -167,7 +171,29 @@ export class Clock {
     let rank = 0
     if (this.ones.set(t, mm % 10, this.duration, 0)) rank++
     if (this.tens.set(t, Math.floor(mm / 10), this.duration, this.stagger * rank)) rank++
-    if (this.hour.set(t, hh, this.duration * 1.25, this.stagger * rank)) this.hourRolls++
+    if (this.hourOnes.set(t, hh % 10, this.duration * 1.25, this.stagger * rank)) rank++
+    this.hourTens.set(t, Math.floor(hh / 10), this.duration * 1.25, this.stagger * rank)
+    if (Math.floor(this.last / 60) !== hh) this.hourRolls++
     this.last = key
+  }
+}
+
+/** Fixed cents, with a stationary decimal point and dollar sign. */
+export class MoneyCounter extends Counter {
+  override set(t: number, value: number) { super.set(t, Math.max(0, Math.round(value))) }
+  protected override digits(value: number) { return String(value).padStart(3, "0") }
+  protected override slot(i: number, len: number) {
+    const lead = len - 1 - i
+    const commasBefore = Math.floor((len - 3) / 3) - Math.floor(Math.max(0, i - 2) / 3)
+    return lead + commasBefore * 0.42 + (i < 2 ? 0.42 : 0)
+  }
+  override sample(t: number) {
+    const { columns } = super.sample(t)
+    const commas: { x: number; opacity: number }[] = []
+    for (let i = 5; i < columns.length; i += 3) {
+      const p = columns[i]!
+      commas.push({ x: p.x + 1.21, opacity: p.opacity })
+    }
+    return { columns, commas, decimalX: columns[2]!.x + 1.21 }
   }
 }
