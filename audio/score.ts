@@ -48,7 +48,8 @@ const panOf = (n: number, cam: { x: number; y: number; zoom: number }) => {
 }
 
 // Rate limits: plucks and spawns queue into a short arpeggio instead of stacking.
-let lastPluck = -1, lastSpawn = -1, lastKit = -1
+let lastPluck = -1, lastSpawn = -1, lastKit = -1, lastGlint = -1, lastTick = -1, lastMsgStep = 0
+const lastCount = { sessions: 0, subagents: 0 }
 const activity = new Float32Array(Math.ceil((D + 3) * 100)) // 10 ms bins, for pad + texture
 const texture = new Float32Array(activity.length)
 const texCluster = new Int16Array(activity.length).fill(-1)
@@ -58,6 +59,21 @@ for (let f = 0; f < D * FPS; f++) {
   sim.advanceTo(f / FPS)
   sim.sampleTrail()
   const { cam } = scene.build(sim, 1 / FPS)
+  // Arrivals: Kit's comet lands as a felt note; agent comets as a faint high glint;
+  // cross-project comets on a bell.
+  for (const c of sim.cues.splice(0)) {
+    const pan = panOf(c.node, cam)
+    const cl = sim.nodes[c.node]!.cluster
+    if (c.kind === "kit" && c.time - lastKit > 0.12) { lastKit = c.time; mix.felt(c.time, noteOf(cl, -1), pan, 0.12) }
+    else if (c.kind === "agent" && c.time - lastGlint > 0.09) { lastGlint = c.time; mix.glint(c.time, noteOf(cl, 2), pan, 0.035) }
+    else if (c.kind === "cross") mix.bell(c.time, noteOf(cl, 1), pan, 0.16)
+  }
+  // The odometer: a very soft tick when a wheel settles, never more than ~14/s.
+  for (const k of ["sessions", "subagents"] as const) {
+    if (sim.counts[k] !== lastCount[k]) { lastCount[k] = sim.counts[k]; if (f / FPS - lastTick > 0.07) { lastTick = f / FPS; mix.tick(f / FPS + 0.18, k === "sessions" ? 0.05 : 0.035, -0.75) } }
+  }
+  const msgStep = Math.floor(sim.counts.messages / 100)
+  if (msgStep !== lastMsgStep) { lastMsgStep = msgStep; if (f / FPS - lastTick > 0.07) { lastTick = f / FPS; mix.tick(f / FPS + 0.2, 0.025, -0.65) } }
   for (const { e, t } of hits) {
     const [, type, n, x] = e
     const cluster = sim.nodes[n]!.cluster
@@ -83,16 +99,11 @@ for (let f = 0; f < D * FPS; f++) {
       case EV.crossPrompt: {
         const from = panOf(x, cam), to = panOf(n, cam)
         mix.whoosh(t, 1.1, from, to, 0.2)
-        mix.bell(t + 1.1, noteOf(sim.nodes[n]!.cluster, 1), to, 0.16)
         activity[bin]! += 3
         break
       }
       case EV.user: {
         activity[bin]! += 1.5
-        if (x === 1 && t - lastKit > 0.14) {
-          lastKit = t
-          mix.felt(t + 0.16, noteOf(cluster, -1), panOf(n, cam), 0.11)
-        }
         texture[bin]! += 1
         break
       }
@@ -108,6 +119,14 @@ for (let f = 0; f < D * FPS; f++) {
   }
 }
 
+// Camera moments: a slow swell that rises with the push-in and resolves on the bloom.
+for (const m of sim.moments) mix.swell(m.at - 2.0, 4.6, noteOf(m.cluster), 0.16)
+// End card: the counters roll up on a rising run of soft ticks, then the map settles on a chord.
+{
+  const at = sim.warp.end + 0.25 + 0.9
+  for (let i = 0; i < 16; i++) mix.tick(at + 0.2 + i * 0.075 * (1 + i * 0.05), 0.03 + i * 0.002, -0.4 + (i % 3) * 0.4)
+  mix.chord(at + 1.9, [ROOT - 12, ROOT, ROOT + 4, ROOT + 7, ROOT + 14], 0.09)
+}
 mix.pad(activity, sim.warp.end)
 // grain pitch follows the project that produced the latest message, so the rain is tuned
 let held = 0

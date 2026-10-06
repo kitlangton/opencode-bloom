@@ -57,11 +57,12 @@ export class Camera {
       const p = sim.nodes[m.parent]!
       let fx0 = p.x - 110, fy0 = p.y - 80, fx1 = p.x + 110, fy1 = p.y + 80
       for (const n of sim.nodes) {
-        if (!n.alive || n.parent !== m.parent) continue
+        // only the children of this burst, not every subagent the parent ever had
+        if (!n.alive || n.parent !== m.parent || n.born < m.at - 1.5) continue
         fx0 = Math.min(fx0, n.x - 50); fy0 = Math.min(fy0, n.y - 50)
         fx1 = Math.max(fx1, n.x + 50); fy1 = Math.max(fy1, n.y + 50)
       }
-      const k = e * 0.9
+      const k = e * 0.85
       x0 += (fx0 - x0) * k; y0 += (fy0 - y0) * k; x1 += (fx1 - x1) * k; y1 += (fy1 - y1) * k
     }
     return { x0, y0, x1, y1 }

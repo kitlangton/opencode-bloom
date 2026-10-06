@@ -75,7 +75,7 @@ export class Mixer {
   /** Cross-session prompt: band-passed air sweeping across the stereo field. */
   whoosh(t: number, dur: number, from: number, to: number, amp: number) {
     const start = Math.floor(t * SR), len = Math.floor(dur * SR)
-    let low = 0, band = 0
+    let low = 0, band = 0, air1 = 0, air2 = 0
     for (let k = 0; k < len; k++) {
       const u = k / len
       const s = u * u * u * (u * (u * 6 - 15) + 10) // same minimum-jerk travel as the comet
@@ -86,7 +86,9 @@ export class Mixer {
       const high = x - low - 0.35 * band
       band += fq * high
       const env = Math.pow(Math.sin(Math.PI * u), 1.6)
-      this.write(start + k, band * env * amp, from + (to - from) * s, 0.45)
+      // two gentle low-passes keep it air, not hiss
+      air1 += 0.32 * (band - air1); air2 += 0.32 * (air1 - air2)
+      this.write(start + k, air2 * env * amp * 1.4, from + (to - from) * s, 0.45)
     }
     this.duck(t + dur * 0.5, 0.3)
   }
@@ -112,6 +114,65 @@ export class Mixer {
       const v = (Math.sin(TAU * f * s) + 0.25 * Math.sin(TAU * 2 * f * s) * Math.exp(-s / 0.08)) * Math.exp(-s / 0.3) * Math.min(1, s / 0.008)
       this.write(start + k, v * amp, pan, 0.25)
     }
+  }
+
+  /** A wooden, filtered tick: the odometer's wheel settling. Soft attack, no click. */
+  tick(t: number, amp: number, pan: number) {
+    const start = Math.floor(t * SR), len = Math.floor(0.06 * SR)
+    const f = 1900 + this.rand() * 200
+    for (let k = 0; k < len; k++) {
+      const s = k / SR
+      const env = Math.min(1, s / 0.0015) * Math.exp(-s / 0.012)
+      const v = Math.sin(TAU * f * s) * 0.6 + Math.sin(TAU * f * 1.51 * s) * 0.4 * Math.exp(-s / 0.005)
+      this.write(start + k, v * env * amp, pan, 0.25)
+    }
+  }
+
+  /** A faint high glint for agent-to-agent notes. */
+  glint(t: number, note: number, pan: number, amp: number) {
+    const f = hz(note)
+    const start = Math.floor(t * SR), len = Math.floor(0.5 * SR)
+    for (let k = 0; k < len; k++) {
+      const s = k / SR
+      this.write(start + k, Math.sin(TAU * f * s) * Math.exp(-s / 0.12) * Math.min(1, s / 0.003) * amp, pan, 0.7)
+    }
+  }
+
+  /** Camera moment: a breathy open fifth that swells with the push-in and blooms. */
+  swell(t: number, dur: number, note: number, amp: number) {
+    const start = Math.floor(t * SR), len = Math.floor(dur * SR)
+    const notes = [note - 12, note - 5, note, note + 7]
+    const ph = notes.map(() => this.rand())
+    let lp = 0
+    for (let k = 0; k < len; k++) {
+      const u = k / len
+      const env = Math.pow(Math.sin(Math.PI * Math.min(1, u * 1.25)), 2) * (u > 0.8 ? 1 - (u - 0.8) / 0.2 : 1)
+      const cutoff = 300 + 2200 * env
+      const a = 1 - Math.exp((-TAU * cutoff) / SR)
+      let v = 0
+      notes.forEach((n, j) => {
+        ph[j] = (ph[j]! + hz(n) / SR) % 1
+        v += ph[j]! * 2 - 1
+      })
+      lp += a * (v / notes.length - lp)
+      this.write(start + k, lp * env * amp, Math.sin(TAU * 0.6 * (k / SR)) * 0.4, 0.6)
+    }
+    this.duck(t + dur * 0.5, 0.2)
+  }
+
+  /** The final chord under the end card: soft electric-piano partials with a long tail. */
+  chord(t: number, notes: number[], amp: number) {
+    const start = Math.floor(t * SR), len = Math.floor(Math.max(0.5, this.n / SR - t) * SR)
+    notes.forEach((n, j) => {
+      const f = hz(n)
+      const pan = (j / (notes.length - 1)) - 0.5
+      const delay = Math.floor(j * 0.045 * SR)
+      for (let k = 0; k < len - delay; k++) {
+        const s = k / SR
+        const v = (Math.sin(TAU * f * s) + 0.3 * Math.sin(TAU * 2 * f * s) * Math.exp(-s / 0.4)) * Math.exp(-s / 2.6) * Math.min(1, s / 0.01)
+        this.write(start + delay + k, v * amp, pan, 0.6)
+      }
+    })
   }
 
   private duck(t: number, depth: number) { this.ducks.push({ t, depth }) }
