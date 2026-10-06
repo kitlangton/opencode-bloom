@@ -1,0 +1,447 @@
+// Turns simulation state into screen-space quads: camera, bodies, light, type.
+import { FLOATS } from "./shaders"
+import { MAX_QUADS, MAX_OVERLAY } from "./gpu"
+import { GOLD, KIT, STEP, rng, type RGB, type Sim } from "./sim"
+import type { Atlas } from "./text"
+
+const GLOW = 10, DISC = 1, RING = 2, LINE = 3, TEXT = 4, SOFT = 15, ADD_DISC = 11, ADD_RING = 12, ADD_LINE = 13
+
+const mix = (a: RGB, b: RGB, t: number): RGB => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+const scale = (a: RGB, k: number): RGB => [a[0] * k, a[1] * k, a[2] * k]
+const WHITE: RGB = [1, 1, 1]
+const clamp01 = (x: number) => Math.min(1, Math.max(0, x))
+const easeOut = (t: number) => 1 - Math.pow(1 - t, 3)
+const easeInOut = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2)
+
+export class Camera {
+  x = 0; y = 0; vx = 0; vy = 0
+  lz = 0; vz = 0
+  primed = false
+
+  constructor(readonly width: number, readonly height: number, readonly unit: number) {}
+
+  private fit(sim: Sim, outro: boolean) {
+    let ax0 = Infinity, ay0 = Infinity, ax1 = -Infinity, ay1 = -Infinity
+    let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity
+    let activeCount = 0
+    for (const n of sim.nodes) {
+      if (!n.alive) continue
+      const pad = n.r + 26
+      bx0 = Math.min(bx0, n.x - pad); by0 = Math.min(by0, n.y - pad)
+      bx1 = Math.max(bx1, n.x + pad); by1 = Math.max(by1, n.y + pad)
+      const recent = sim.time - n.lastActive < 5 || sim.time - n.born < 2
+      if (recent) {
+        activeCount++
+        ax0 = Math.min(ax0, n.x - pad); ay0 = Math.min(ay0, n.y - pad)
+        ax1 = Math.max(ax1, n.x + pad); ay1 = Math.max(ay1, n.y + pad)
+      }
+    }
+    for (const h of sim.hubs) {
+      if (!h.alive) continue
+      bx0 = Math.min(bx0, h.x - 60); by0 = Math.min(by0, h.y - 30)
+      bx1 = Math.max(bx1, h.x + 60); by1 = Math.max(by1, h.y + 30)
+    }
+    if (!isFinite(bx0)) return null
+    let x0 = bx0, y0 = by0, x1 = bx1, y1 = by1
+    if (activeCount && !outro) {
+      const k = 0.4 // keep the whole city partly in mind so the camera doesn't lurch
+      x0 = ax0 + (bx0 - ax0) * k; y0 = ay0 + (by0 - ay0) * k
+      x1 = ax1 + (bx1 - ax1) * k; y1 = ay1 + (by1 - ay1) * k
+    }
+    return { x0, y0, x1, y1 }
+  }
+
+  update(sim: Sim, dt: number) {
+    const outro = sim.time > sim.warp.end
+    const box = this.fit(sim, outro)
+    if (!box) return
+    const W = this.width, H = this.height, u = this.unit
+    const mx = W * 0.1, mt = H * 0.16, mb = H * 0.13
+    const cx = (box.x0 + box.x1) / 2
+    const cy = (box.y0 + box.y1) / 2
+    const bw = Math.max(240, box.x1 - box.x0), bh = Math.max(200, box.y1 - box.y0)
+    const z = Math.min((W - 2 * mx) / (bw * u), (H - mt - mb) / (bh * u))
+    const tz = Math.log(Math.min(1.9, Math.max(0.12, z)))
+    // shift target so the box centers in the area between header and legend
+    const ty = cy - ((mt - mb) / 2) / (Math.exp(this.lz) * u)
+    if (!this.primed) {
+      this.primed = true
+      this.x = cx; this.y = ty; this.lz = tz
+    }
+    const steps = Math.round(dt / STEP)
+    const wc = outro ? 1.1 : 1.5, wz = outro ? 0.9 : 1.1
+    for (let i = 0; i < steps; i++) {
+      this.vx += (-(this.x - cx) * wc * wc - 2 * wc * this.vx) * STEP
+      this.vy += (-(this.y - ty) * wc * wc - 2 * wc * this.vy) * STEP
+      this.vz += (-(this.lz - tz) * wz * wz - 2 * wz * this.vz) * STEP
+      this.x += this.vx * STEP; this.y += this.vy * STEP; this.lz += this.vz * STEP
+    }
+  }
+
+  get zoom() { return Math.exp(this.lz) }
+}
+
+export interface SceneOptions { titles: boolean; dateLabel: (ms: number) => string; timeLabel: (ms: number) => string }
+
+export function createScene(width: number, height: number, atlas: Atlas, opts: SceneOptions) {
+  const unit = height / 1080 // resolution scale; layout is authored at 1080 p
+  const u = Math.min(width, height) / 1080
+  const data = new Float32Array(MAX_QUADS * FLOATS)
+  const overData = new Float32Array(MAX_OVERLAY * FLOATS)
+  const bufs = [data, overData], caps = [MAX_QUADS, MAX_OVERLAY], counts = [0, 0]
+  let layer = 0 // 0: world (bloomed), 1: overlay (crisp, after tonemap)
+  const cam = new Camera(width, height, u)
+  const labels: { x: number; y: number; a: number; side: number }[] = []
+
+  const push = (x0: number, y0: number, x1: number, y1: number, size: number, thick: number, kind: number, endAlpha: number, c: RGB, a: number, uv?: [number, number, number, number]) => {
+    if (counts[layer]! >= caps[layer]! || a <= 0.002) return
+    const data = bufs[layer]!
+    const b = counts[layer]!++ * FLOATS
+    data[b] = x0; data[b + 1] = y0; data[b + 2] = x1; data[b + 3] = y1
+    data[b + 4] = size; data[b + 5] = thick; data[b + 6] = kind; data[b + 7] = endAlpha
+    data[b + 8] = c[0]; data[b + 9] = c[1]; data[b + 10] = c[2]; data[b + 11] = Math.min(a, 64)
+    if (uv) { data[b + 12] = uv[0]; data[b + 13] = uv[1]; data[b + 14] = uv[2]; data[b + 15] = uv[3] }
+    else { data[b + 12] = 0; data[b + 13] = 0; data[b + 14] = 0; data[b + 15] = 0 }
+  }
+  const glow = (x: number, y: number, r: number, c: RGB, a: number) => push(x, y, 0, 0, r, 0, GLOW, 1, c, a)
+  const disc = (x: number, y: number, r: number, c: RGB, a: number, additive = false) => push(x, y, 0, 0, r, 0, additive ? ADD_DISC : DISC, 1, c, a)
+  const ring = (x: number, y: number, r: number, w: number, c: RGB, a: number, additive = true) => push(x, y, 0, 0, r, w, additive ? ADD_RING : RING, 1, c, a)
+  const line = (x0: number, y0: number, x1: number, y1: number, w: number, c: RGB, a: number, endAlpha = 1, additive = false) => push(x0, y0, x1, y1, w, 0, additive ? ADD_LINE : LINE, endAlpha, c, a)
+  const soft = (x0: number, y0: number, x1: number, y1: number, w: number, c: RGB, a: number, endAlpha = 1) => push(x0, y0, x1, y1, w, 0, SOFT, endAlpha, c, a)
+  const text = (s: string, x: number, y: number, px: number, c: RGB, a: number, opts: { weight?: number; align?: "left" | "right" | "center"; tracking?: number } = {}) => {
+    const g = atlas.get(s, Math.round(px), opts.weight ?? 500, opts.tracking ?? 0)
+    const pad = atlas.pad(g)
+    let left = x - pad
+    const inner = g.w - pad * 2
+    if (opts.align === "right") left -= inner
+    else if (opts.align === "center") left -= inner / 2
+    const top = Math.round(y - g.ascent)
+    left = Math.round(left)
+    push(left, top, left + g.w, top + g.h, 0, 0, TEXT, 1, c, a, g.uv)
+    return inner
+  }
+
+  // Static star field, parallaxed slightly against the camera.
+  const stars: { x: number; y: number; s: number; tw: number; ph: number; c: RGB }[] = []
+  {
+    const r = rng(42)
+    for (let i = 0; i < 520; i++) {
+      const warm = r()
+      stars.push({ x: r(), y: r(), s: Math.pow(r(), 3), tw: 0.2 + r() * 0.8, ph: r() * 6.28, c: warm < 0.2 ? [1, 0.85, 0.7] : warm < 0.5 ? [0.7, 0.8, 1] : [0.9, 0.92, 1] })
+    }
+  }
+
+  function build(sim: Sim, frameDt: number) {
+    counts[0] = 0; counts[1] = 0; layer = 0
+    cam.update(sim, frameDt)
+    const z = cam.zoom
+    const S = u
+    const ox = width / 2, oy = height / 2
+    const sx = (x: number) => (x - cam.x) * z * S + ox
+    const sy = (y: number) => (y - cam.y) * z * S + oy
+    const bodyScale = Math.pow(z, 0.72) * S
+    const t = sim.time
+    const intro = clamp01((t - 0.15) / 1.2)
+
+    // stars
+    const parX = cam.x * z * S * 0.06, parY = cam.y * z * S * 0.06
+    for (const st of stars) {
+      const x = ((st.x * width - parX) % width + width) % width
+      const y = ((st.y * height - parY) % height + height) % height
+      const tw = 0.65 + 0.35 * Math.sin(t * st.tw * 1.3 + st.ph)
+      const a = (0.12 + st.s * 0.55) * tw * intro
+      disc(x, y, (0.55 + st.s * 0.9) * S, st.c, a, true)
+      if (st.s > 0.5) glow(x, y, 6 * S * st.s, st.c, a * 0.12)
+    }
+
+    const nodes = sim.nodes, hubs = sim.hubs
+    const act = (n: { lastActive: number; energy: number }) => clamp01(Math.exp(-(t - n.lastActive) / 3.5) * 0.6 + Math.min(1, n.energy) * 0.6)
+
+    // worktree tethers
+    for (const h of hubs) {
+      if (!h.alive || h.parent === null) continue
+      const p = hubs[h.parent]!
+      const a = 0.07 * clamp01((t - h.born) * 2)
+      line(sx(h.x), sy(h.y), sx(p.x), sy(p.y), 0.6 * S, h.color, a, 0.3)
+    }
+
+    // edges: session -> parent session or project hub
+    for (const n of nodes) {
+      if (!n.alive) continue
+      const p = n.parent !== null && nodes[n.parent]!.alive ? nodes[n.parent]! : null
+      const h = hubs[n.cluster]!
+      const ax = p ? p.x : h.x, ay = p ? p.y : h.y
+      const k = act(n)
+      const born = clamp01((t - n.born) / 0.5)
+      const a = (0.1 + 0.42 * k) * born
+      const x0 = sx(n.x), y0 = sy(n.y)
+      const x1 = x0 + (sx(ax) - x0) * born, y1 = y0 + (sy(ay) - y0) * born
+      line(x0, y0, x1, y1, (0.55 + 0.35 * k) * S, mix(h.color, WHITE, 0.15), a, p ? 0.75 : 0.35)
+    }
+
+    // cross-session comets: arc lingers, head travels with a fading tail
+    for (const c of sim.comets) {
+      const a = nodes[c.from]!, b = nodes[c.to]!
+      const age = t - c.t0
+      const ax = sx(a.x), ay = sy(a.y), bx = sx(b.x), by = sy(b.y)
+      const dx = bx - ax, dy = by - ay
+      const mx = (ax + bx) / 2 - dy * c.bend, my = (ay + by) / 2 + dx * c.bend
+      const at = (s: number): [number, number] => {
+        const i = 1 - s
+        return [i * i * ax + 2 * i * s * mx + s * s * bx, i * i * ay + 2 * i * s * my + s * s * by]
+      }
+      const head = clamp01(age / c.dur)
+      const hp = easeInOut(head)
+      const fade = age < c.dur ? 1 : Math.max(0, 1 - (age - c.dur) / 2.2)
+      const SEG = 28
+      for (let i = 0; i < SEG; i++) {
+        const s0 = (i / SEG) * hp, s1 = ((i + 1) / SEG) * hp
+        const p0 = at(s0), p1 = at(s1)
+        line(p0[0], p0[1], p1[0], p1[1], 0.8 * S, GOLD, 0.35 * fade, 1, true)
+      }
+      if (age < c.dur + 0.2) {
+        const TAIL = 14
+        for (let i = 0; i < TAIL; i++) {
+          const s = Math.max(0, hp - i * 0.018)
+          const p = at(s)
+          const k = 1 - i / TAIL
+          glow(p[0], p[1], (10 - i * 0.45) * S, GOLD, 0.5 * k * k)
+        }
+        const p = at(hp)
+        disc(p[0], p[1], 2.4 * S, mix(GOLD, WHITE, 0.6), 1.2, true)
+      }
+      // arrival flash
+      const arr = age - c.dur
+      if (arr > 0 && arr < 1.0) {
+        const e = easeOut(arr / 1.0)
+        ring(bx, by, (b.r * bodyScale + 4 * S) + e * 46 * S, 1.6 * S * (1 - e) + 0.3, GOLD, 0.9 * (1 - e))
+        glow(bx, by, 40 * S, GOLD, 0.5 * (1 - e) * (1 - e))
+      }
+    }
+
+    // subagent spawn pulses: a bead races down the new edge
+    for (const p of sim.pulses) {
+      const a = nodes[p.from]!, b = nodes[p.to]!
+      const k = clamp01((t - p.t0) / p.dur)
+      const e = easeOut(k)
+      const x = sx(a.x) + (sx(b.x) - sx(a.x)) * e, y = sy(a.y) + (sy(b.y) - sy(a.y)) * e
+      const c = mix(hubs[b.cluster]!.color, WHITE, 0.5)
+      soft(sx(a.x), sy(a.y), x, y, 3 * S, c, 0.5 * (1 - k * 0.5), 1)
+      glow(x, y, 12 * S, c, 0.8 * (1 - k * 0.6))
+    }
+
+    // Kit's prompt beams
+    const av = sim.avatar
+    if (av.alive) {
+      const avx = sx(av.x), avy = sy(av.y)
+      for (const bm of sim.beams) {
+        const n = nodes[bm.to]!
+        const age = t - bm.t0
+        const k = clamp01(age / 0.9)
+        const grow = easeOut(clamp01(age / 0.12))
+        const tx = avx + (sx(n.x) - avx) * grow, ty = avy + (sy(n.y) - avy) * grow
+        const a = (1 - k) * (1 - k)
+        soft(avx, avy, tx, ty, 5 * S, KIT, 0.35 * a, 0.8)
+        line(avx, avy, tx, ty, 0.7 * S, KIT, 0.8 * a, 1, true)
+      }
+    }
+
+    // halos (additive)
+    for (const n of nodes) {
+      if (!n.alive) continue
+      const h = hubs[n.cluster]!
+      const k = act(n)
+      const r = n.r * bodyScale
+      const e = Math.min(1.6, n.energy)
+      const kk = n.root ? 1 : 0.6
+      glow(sx(n.x), sy(n.y), r * 3.4 + (8 + 16 * e) * S, h.color, (0.05 + 0.16 * k + 0.18 * e) * kk + n.spawnFlash * 0.7)
+    }
+
+    // sparks
+    for (let i = 0; i < sim.sage.length; i++) {
+      const age = sim.sage[i]!, life = sim.slife[i]!
+      if (age >= life) continue
+      const k = age / life
+      const a = Math.pow(1 - k, 1.6)
+      const c = mix(hubs[sim.shub[i]!]!.color, WHITE, 0.45)
+      const x = sx(sim.sx[i]!), y = sy(sim.sy[i]!)
+      const s = sim.ssize[i]! * Math.pow(z, 0.45) * S
+      glow(x, y, s * 5, c, 0.22 * a)
+      disc(x, y, s * (1 - k * 0.5), c, 0.9 * a, true)
+    }
+
+    // rings
+    for (const r of sim.rings) {
+      const n = nodes[r.node]!
+      const k = clamp01((t - r.t0) / r.dur)
+      const e = easeOut(k)
+      ring(sx(n.x), sy(n.y), n.r * bodyScale + 2 * S + e * r.grow * S * Math.pow(z, 0.3), r.width * S * (1 - k) + 0.2, r.color, r.alpha * (1 - k) * (1 - k))
+    }
+
+    // hubs: a quiet marker at each project's root
+    for (const h of hubs) {
+      if (!h.alive) continue
+      const born = clamp01((t - h.born) / 0.6)
+      const heat = clamp01(h.heat)
+      glow(sx(h.x), sy(h.y), 14 * S, h.color, (0.1 + 0.25 * heat) * born)
+      disc(sx(h.x), sy(h.y), 2.2 * S * born, mix(h.color, WHITE, 0.3), 0.5 + 0.4 * heat)
+    }
+
+    // bodies: subagents first, then sessions on top
+    for (const pass of [false, true]) {
+      for (const n of nodes) {
+        if (!n.alive || n.root !== pass) continue
+        const h = hubs[n.cluster]!
+        const k = act(n)
+        const r = Math.max(0, n.r * bodyScale)
+        const x = sx(n.x), y = sy(n.y)
+        const ember = n.root ? 0.62 : 0.42
+        const bright = ember + (1.15 - ember) * k + Math.min(1, n.energy) * 0.5
+        const col = scale(mix(h.color, WHITE, 0.12 + 0.45 * Math.min(1, n.energy) + n.spawnFlash * 0.4), bright)
+        disc(x, y, r + 1.4 * S, [0.01, 0.012, 0.025], 0.85) // dark rim separates overlapping bodies
+        disc(x, y, r, col, 1)
+        if (n.root) ring(x, y, r + 3.2 * S, 0.9 * S, mix(h.color, WHITE, 0.3), 0.3 + 0.5 * k, true)
+      }
+    }
+
+    // Kit: a warm star with a short wake
+    if (av.alive) {
+      const avx = sx(av.x), avy = sy(av.y)
+      const since = t - av.lastPrompt
+      const pulse = Math.exp(-since * 4)
+      for (let i = 1; i < av.trail.length; i++) {
+        const [x0, y0] = av.trail[i - 1]!, [x1, y1] = av.trail[i]!
+        const k = 1 - i / av.trail.length
+        line(sx(x0), sy(y0), sx(x1), sy(y1), (2.2 * k + 0.3) * S, KIT, 0.35 * k, 1, true)
+      }
+      glow(avx, avy, (26 + 18 * pulse) * S, KIT, 0.35 + 0.5 * pulse)
+      disc(avx, avy, 3.6 * S, KIT, 1.6, true)
+      disc(avx, avy, 2.2 * S, WHITE, 2.0, true)
+    }
+
+    // ---- overlay: everything below draws after tonemapping
+    layer = 1
+    if (av.alive) text("kit", sx(av.x) + 9 * S, sy(av.y) - 8 * S, 13 * S, KIT, 0.8, { weight: 600, tracking: 0.5 * S })
+
+    // Project labels caption their constellation: under (or over) the bulk of its sessions,
+    // giving way to busier projects when they would collide.
+    const placed: [number, number, number, number][] = [
+      [0, 0, 300 * unit, 130 * unit], // clock
+      [0, height - 80 * unit, 760 * unit, height], // legend
+    ]
+    const hits = (r: [number, number, number, number]) => placed.some((p) => r[0] < p[2] && r[2] > p[0] && r[1] < p[3] && r[3] > p[1])
+    const order = hubs.map((h, i) => i).filter((i) => hubs[i]!.alive)
+      .sort((a, b) => hubs[b]!.heat - hubs[a]!.heat || a - b)
+    const px = 14 * S
+    for (const i of order) {
+      const h = hubs[i]!
+      let cx = 0, cy = 0, m = 0
+      for (const n of nodes) if (n.alive && n.cluster === i) { cx += sx(n.x); cy += sy(n.y); m++ }
+      let x0: number, y0: number, x1: number, y1: number
+      if (m === 0) { cx = sx(h.x); cy = sy(h.y); x0 = x1 = cx; y0 = y1 = cy }
+      else {
+        cx /= m; cy /= m
+        let rms = 0
+        for (const n of nodes) if (n.alive && n.cluster === i) rms += (sx(n.x) - cx) ** 2 + (sy(n.y) - cy) ** 2
+        const lim = Math.max(40 * S, 2.2 * Math.sqrt(rms / m))
+        x0 = y0 = Infinity; x1 = y1 = -Infinity
+        for (const n of nodes) {
+          if (!n.alive || n.cluster !== i) continue
+          const x = sx(n.x), y = sy(n.y)
+          if (Math.hypot(x - cx, y - cy) > lim) continue
+          const r = n.r * bodyScale + 5 * S
+          x0 = Math.min(x0, x - r); x1 = Math.max(x1, x + r); y0 = Math.min(y0, y - r); y1 = Math.max(y1, y + r)
+        }
+        cx = (x0 + x1) / 2
+      }
+      const w = measure(h.label, px, 500, 0.3 * S)
+      const st = (labels[i] ??= { x: cx, y: y1 + 18 * S, a: 0, side: 1 })
+      const cand = (side: number): [number, number, number, number] => {
+        const y = side > 0 ? y1 + 17 * S : y0 - 7 * S
+        return [cx - w / 2 - 4 * S, y - px, cx + w / 2 + 4 * S, y + 4 * S]
+      }
+      let side = st.side, dim = 1
+      if (hits(cand(side))) {
+        if (!hits(cand(-side))) side = -side
+        else dim = 0.2
+      }
+      st.side = side
+      const r = cand(side)
+      placed.push(r)
+      const tx = cx, ty = side > 0 ? y1 + 17 * S : y0 - 7 * S
+      const fresh = st.a === 0
+      st.x = fresh ? tx : st.x + (tx - st.x) * 0.16
+      st.y = fresh ? ty : st.y + (ty - st.y) * 0.16
+      const heat = clamp01(h.heat * 1.4 + Math.exp(-(t - h.lastActive) / 3) * 0.5)
+      const born = clamp01((t - h.born - 0.15) / 0.8)
+      const ta = (0.36 + 0.6 * heat) * born * dim
+      st.a = Math.max(1e-4, st.a + (ta - st.a) * 0.12)
+      text(h.label, st.x, st.y, px, mix(h.color, WHITE, 0.6), st.a, { weight: 500, align: "center", tracking: 0.3 * S })
+    }
+
+    if (opts.titles) {
+      for (const n of nodes) {
+        if (!n.alive || !n.root || !n.title) continue
+        const k = clamp01(Math.min(1, n.energy) * 1.2)
+        if (k < 0.05) continue
+        const s = n.title.length > 46 ? n.title.slice(0, 45) + "…" : n.title
+        text(s, sx(n.x) + n.r * bodyScale + 8 * S, sy(n.y) + 4 * S, 11.5 * S, WHITE, 0.7 * k, { weight: 500 })
+      }
+    }
+
+    // clock
+    const real = sim.realTime
+    const L = 56 * unit, T = 64 * unit
+    const ui = clamp01((t - 0.1) / 0.8)
+    text(opts.dateLabel(real), L, T, 15 * unit, [0.8, 0.84, 0.95], 0.55 * ui, { weight: 500, tracking: 1.2 * unit })
+    {
+      const hhmm = opts.timeLabel(real)
+      const px = 40 * unit
+      const adv = atlasAdvance(px)
+      let x = L - 1 * unit
+      for (const ch of hhmm) {
+        const w = ch === ":" ? adv * 0.42 : adv
+        text(ch, x + w / 2, T + 44 * unit, px, [0.93, 0.95, 1], 0.92 * ui, { weight: 300, align: "center" })
+        x += w
+      }
+    }
+
+    // legend
+    {
+      const y = height - 50 * unit
+      let x = L
+      const px = 12.5 * unit
+      const c: RGB = [0.75, 0.79, 0.9]
+      const a = 0.55 * ui
+      const item = (draw: (x: number) => number, label: string) => {
+        const w = draw(x)
+        x += w + 8 * unit
+        x += text(label, x, y + 4.5 * unit, px, c, a, { weight: 500, tracking: 0.4 * unit }) + 22 * unit
+      }
+      const base: RGB = [0.48, 0.64, 1.0]
+      item((x) => { disc(x + 5 * unit, y, 4 * unit, base, ui); ring(x + 5 * unit, y, 7 * unit, 0.9 * unit, base, 0.6 * ui); return 12 * unit }, "session")
+      item((x) => { disc(x + 3 * unit, y, 2.6 * unit, scale(base, 0.8), ui); return 6 * unit }, "subagent")
+      item((x) => { glow(x + 4 * unit, y, 12 * unit, KIT, 0.6 * ui); disc(x + 4 * unit, y, 2.6 * unit, WHITE, 1.4 * ui, true); return 8 * unit }, "kit")
+      item((x) => { line(x, y, x + 16 * unit, y, 0.8 * unit, GOLD, 0.8 * ui, 1, true); disc(x + 16 * unit, y, 2 * unit, GOLD, ui, true); return 18 * unit }, "session → session")
+      item((x) => { disc(x + 2 * unit, y, 1.3 * unit, [0.85, 0.9, 1], ui, true); disc(x + 7 * unit, y - 3 * unit, 1 * unit, [0.85, 0.9, 1], 0.7 * ui, true); return 9 * unit }, "tool call")
+    }
+
+    return { count: counts[0]!, overCount: counts[1]!, cam }
+  }
+
+  function measure(s: string, px: number, weight: number, tracking: number) {
+    const g = atlas.get(s, Math.round(px), weight, tracking)
+    return g.w - atlas.pad(g) * 2
+  }
+
+  function atlasAdvance(px: number) {
+    let m = 0
+    for (const d of "0123456789") {
+      const g = atlas.get(d, Math.round(px), 300, 0)
+      m = Math.max(m, g.w - atlas.pad(g) * 2)
+    }
+    return m
+  }
+
+  return { data, overData, build, cam }
+}

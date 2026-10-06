@@ -1,0 +1,20 @@
+{
+  "name": "session-bloom",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "extract": "bun extract/extract.ts",
+    "render": "bun render.ts",
+    "preview": "bun render.ts --serve",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "vgpu": "0.5.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.4.2",
+    "@webgpu/types": "^0.1.74",
+    "playwright": "1.63.0",
+    "typescript": "^7.0.2"
+  }
+}
