@@ -1,10 +1,10 @@
 // Turns simulation state into screen-space quads: camera, bodies, light, type.
 import { FLOATS } from "./shaders"
 import { MAX_QUADS, MAX_OVERLAY } from "./gpu"
-import { BEAM_TRAVEL, GOLD, KIT, STEP, rng, type RGB, type Sim } from "./sim"
+import { ANTICIPATION, BEAM_TRAVEL, GOLD, KIT, STEP, rng, type RGB, type Sim } from "./sim"
 import type { Atlas } from "./text"
 
-const GLOW = 10, DISC = 1, RING = 2, LINE = 3, TEXT = 4, SOFT = 15, ADD_DISC = 11, ADD_RING = 12, ADD_LINE = 13
+const GLOW = 10, DISC = 1, RING = 2, LINE = 3, TEXT = 4, SOFT = 15, ADD_DISC = 11, ADD_RING = 12, ADD_LINE = 13, ORB = 6, FLARE = 17
 
 const mix = (a: RGB, b: RGB, t: number): RGB => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
 const scale = (a: RGB, k: number): RGB => [a[0] * k, a[1] * k, a[2] * k]
@@ -57,7 +57,7 @@ export class Camera {
     const box = this.fit(sim, outro)
     if (!box) return
     const W = this.width, H = this.height, u = this.unit
-    const mx = W * 0.1, mt = H * (outro ? 0.12 : 0.16), mb = H * (outro ? 0.1 : 0.13)
+    const mx = W * 0.09, mt = H * (outro ? 0.12 : 0.15), mb = H * (outro ? 0.08 : 0.09)
     const cx = (box.x0 + box.x1) / 2
     const cy = (box.y0 + box.y1) / 2
     const bw = Math.max(240, box.x1 - box.x0), bh = Math.max(200, box.y1 - box.y0)
@@ -108,6 +108,8 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
   const disc = (x: number, y: number, r: number, c: RGB, a: number, additive = false) => push(x, y, 0, 0, r, 0, additive ? ADD_DISC : DISC, 1, c, a)
   const ring = (x: number, y: number, r: number, w: number, c: RGB, a: number, additive = true) => push(x, y, 0, 0, r, w, additive ? ADD_RING : RING, 1, c, a)
   const line = (x0: number, y0: number, x1: number, y1: number, w: number, c: RGB, a: number, endAlpha = 1, additive = false) => push(x0, y0, x1, y1, w, 0, additive ? ADD_LINE : LINE, endAlpha, c, a)
+  const orb = (x: number, y: number, r: number, c: RGB, core: number) => push(x, y, 0, 0, r, core, ORB, 1, c, 1)
+  const flare = (x: number, y: number, len: number, w: number, c: RGB, a: number) => push(x, y, 0, 0, len, w, FLARE, 1, c, a)
   const soft = (x0: number, y0: number, x1: number, y1: number, w: number, c: RGB, a: number, endAlpha = 1) => push(x0, y0, x1, y1, w, 0, SOFT, endAlpha, c, a)
   // Moving labels stay unsnapped so they glide; fixed UI snaps to whole pixels for crispness.
   const text = (s: string, x: number, y: number, px: number, c: RGB, a: number, opts: { weight?: number; align?: "left" | "right" | "center"; tracking?: number; snap?: boolean } = {}) => {
@@ -123,14 +125,16 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
     return inner
   }
 
-  // Static star field, parallaxed slightly against the camera.
-  const stars: { x: number; y: number; s: number; tw: number; ph: number; c: RGB }[] = []
+  // Three star layers at different depths: dust far away, a mid field, and a few near
+  // bright stars that parallax most and carry small flares.
+  type Star = { x: number; y: number; s: number; tw: number; ph: number; c: RGB; depth: number }
+  const stars: Star[] = []
   {
     const r = rng(42)
-    for (let i = 0; i < 520; i++) {
-      const warm = r()
-      stars.push({ x: r(), y: r(), s: Math.pow(r(), 3), tw: 0.2 + r() * 0.8, ph: r() * 6.28, c: warm < 0.2 ? [1, 0.85, 0.7] : warm < 0.5 ? [0.7, 0.8, 1] : [0.9, 0.92, 1] })
-    }
+    const tint = (): RGB => { const w = r(); return w < 0.2 ? [1, 0.85, 0.7] : w < 0.5 ? [0.7, 0.8, 1] : [0.9, 0.92, 1] }
+    for (let i = 0; i < 900; i++) stars.push({ x: r(), y: r(), s: Math.pow(r(), 4) * 0.5, tw: 0.2 + r() * 0.8, ph: r() * 6.28, c: tint(), depth: 0.015 })
+    for (let i = 0; i < 260; i++) stars.push({ x: r(), y: r(), s: 0.2 + Math.pow(r(), 3) * 0.6, tw: 0.2 + r() * 0.8, ph: r() * 6.28, c: tint(), depth: 0.05 })
+    for (let i = 0; i < 26; i++) stars.push({ x: r(), y: r(), s: 0.75 + r() * 0.25, tw: 0.15 + r() * 0.3, ph: r() * 6.28, c: tint(), depth: 0.11 })
   }
 
   function build(sim: Sim, frameDt: number) {
@@ -146,18 +150,28 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
     const intro = clamp01((t - 0.15) / 1.2)
 
     // stars
-    const parX = cam.x * z * S * 0.06, parY = cam.y * z * S * 0.06
     for (const st of stars) {
+      const parX = cam.x * z * S * st.depth, parY = cam.y * z * S * st.depth
       const x = ((st.x * width - parX) % width + width) % width
       const y = ((st.y * height - parY) % height + height) % height
       const tw = 0.65 + 0.35 * Math.sin(t * st.tw * 1.3 + st.ph)
-      const a = (0.12 + st.s * 0.55) * tw * intro
-      disc(x, y, (0.55 + st.s * 0.9) * S, st.c, a, true)
-      if (st.s > 0.5) glow(x, y, 6 * S * st.s, st.c, a * 0.12)
+      const a = (0.1 + st.s * 0.6) * tw * intro
+      disc(x, y, (0.45 + st.s * 1.0) * S, st.c, a, true)
+      if (st.s > 0.5) glow(x, y, 7 * S * st.s, st.c, a * 0.14)
+      if (st.depth > 0.1) flare(x, y, 9 * S, 0.45 * S, st.c, a * 0.35)
     }
 
     const nodes = sim.nodes, hubs = sim.hubs
     const act = (n: { lastActive: number; energy: number }) => clamp01(Math.exp(-(t - n.lastActive) / 3.5) * 0.6 + Math.min(1, n.energy) * 0.6)
+
+    // nebula tint: a broad, faint haze of each active project's color around its sessions
+    for (let i = 0; i < hubs.length; i++) {
+      const h = hubs[i]!
+      if (!h.alive) continue
+      const heat = clamp01(h.heat * 0.8 + Math.exp(-(t - h.lastActive) / 6) * 0.4)
+      if (heat < 0.02) continue
+      glow(sx(h.x), sy(h.y), (h.extent * z * S) * 2.2 + 160 * S, h.color, 0.035 * heat)
+    }
 
     // worktree tethers
     for (const h of hubs) {
@@ -167,18 +181,51 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
       line(sx(h.x), sy(h.y), sx(p.x), sy(p.y), 0.6 * S, h.color, a, 0.3)
     }
 
-    // edges: session -> parent session or project hub
-    for (const n of nodes) {
+    // edges: curved, tapered filaments from parent (or project root) out to each session.
+    // When a session is busy, light flows outward along its filament. Old, idle edges cool.
+    for (let ni = 0; ni < nodes.length; ni++) {
+      const n = nodes[ni]!
       if (!n.alive) continue
       const p = n.parent !== null && nodes[n.parent]!.alive ? nodes[n.parent]! : null
       const h = hubs[n.cluster]!
-      const ax = p ? p.x : h.x, ay = p ? p.y : h.y
       const k = act(n)
       const born = clamp01((t - n.born) / 0.5)
-      const a = (0.1 + 0.42 * k) * born
-      const x0 = sx(n.x), y0 = sy(n.y)
-      const x1 = x0 + (sx(ax) - x0) * born, y1 = y0 + (sy(ay) - y0) * born
-      line(x0, y0, x1, y1, (0.55 + 0.35 * k) * S, mix(h.color, WHITE, 0.15), a, p ? 0.75 : 0.35)
+      const idle = t - n.lastActive
+      const a = (0.05 + 0.08 * Math.exp(-idle / 25) + 0.4 * k) * born
+      const ax = sx(p ? p.x : h.x), ay = sy(p ? p.y : h.y)
+      const bx = sx(n.x), by = sy(n.y)
+      const dx = bx - ax, dy = by - ay
+      const len = Math.hypot(dx, dy)
+      if (len < 0.5) continue
+      const bend = (ni % 2 ? 1 : -1) * 0.16
+      const mx = (ax + bx) / 2 - dy * bend, my = (ay + by) / 2 + dx * bend
+      const at = (s: number): [number, number] => {
+        const i = 1 - s
+        return [i * i * ax + 2 * i * s * mx + s * s * bx, i * i * ay + 2 * i * s * my + s * s * by]
+      }
+      // grows out from the parent on birth
+      const end = smoother(born)
+      const SEG = len > 60 * S ? 8 : 4
+      const w0 = (p ? 1.1 : 0.9) * (0.75 + 0.4 * k) * S, w1 = 0.35 * S
+      const col = mix(h.color, WHITE, 0.2)
+      let prev = at(0)
+      for (let si = 1; si <= SEG; si++) {
+        const s1 = (si / SEG) * end
+        const cur = at(s1)
+        const f = (si - 0.5) / SEG
+        line(prev[0], prev[1], cur[0], cur[1], w0 + (w1 - w0) * f, col, a * (1 - 0.45 * f), 1)
+        prev = cur
+      }
+      const e = Math.min(1, n.energy)
+      if (e > 0.12 && born >= 1) {
+        for (let j = 0; j < 2; j++) {
+          const s = (t * (0.9 + (ni % 5) * 0.08) + j * 0.5 + ni * 0.137) % 1
+          const q = at(smoother(s))
+          const fade = Math.sin(Math.PI * s)
+          glow(q[0], q[1], 6 * S, col, 0.5 * e * fade)
+          disc(q[0], q[1], 0.9 * S, mix(col, WHITE, 0.6), 0.9 * e * fade, true)
+        }
+      }
     }
 
     // cross-session comets: arc lingers, head travels with a fading tail
@@ -258,8 +305,17 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
       const k = act(n)
       const r = n.r * bodyScale
       const e = Math.min(1.6, n.energy)
-      const kk = n.root ? 1 : 0.6
-      glow(sx(n.x), sy(n.y), r * 3 + (8 + 12 * e) * S, h.color, (0.05 + 0.15 * k + 0.16 * e) * kk + n.spawnFlash * 0.7)
+      const kk = n.root ? 1 : 0.5
+      const x = sx(n.x), y = sy(n.y)
+      // big bodies get a wide, soft corona; small ones only a tight glow
+      glow(x, y, r * 2 + (5 + 6 * e) * S, h.color, ((0.08 + 0.2 * k + 0.2 * e) * kk + n.spawnFlash * 0.6))
+      if (n.root) glow(x, y, r * 5 + (14 + 16 * e) * S, h.color, (0.03 + 0.06 * k + 0.08 * e) * Math.min(1, r / (6 * S)))
+      // anticipation: light pulls inward before a subagent is released
+      if (n.gather > 0.02) {
+        const g = n.gather
+        ring(x, y, r + (2 + 22 * g) * S, 1.2 * S, mix(h.color, WHITE, 0.6), 0.7 * (1 - g) * g * 4)
+        glow(x, y, r * 2.5 + 10 * S, mix(h.color, WHITE, 0.4), 0.35 * g)
+      }
     }
 
     // sparks
@@ -278,6 +334,7 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
     // rings
     for (const r of sim.rings) {
       const n = nodes[r.node]!
+      if (!n.alive || t < r.t0) continue
       const k = clamp01((t - r.t0) / r.dur)
       const e = easeOut(k)
       ring(sx(n.x), sy(n.y), n.r * bodyScale + 2 * S + e * r.grow * S * Math.pow(z, 0.3), r.width * S * (1 - k) + 0.2, r.color, r.alpha * (1 - k) * (1 - k))
@@ -288,8 +345,8 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
       if (!h.alive) continue
       const born = clamp01((t - h.born) / 0.6)
       const heat = clamp01(h.heat)
-      glow(sx(h.x), sy(h.y), 14 * S, h.color, (0.1 + 0.25 * heat) * born)
-      disc(sx(h.x), sy(h.y), 2.2 * S * born, mix(h.color, WHITE, 0.3), 0.5 + 0.4 * heat)
+      glow(sx(h.x), sy(h.y), 10 * S, h.color, (0.06 + 0.16 * heat) * born)
+      disc(sx(h.x), sy(h.y), 1.6 * S * born, mix(h.color, WHITE, 0.3), 0.35 + 0.35 * heat)
     }
 
     // bodies: subagents first, then sessions on top
@@ -302,10 +359,16 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
         const x = sx(n.x), y = sy(n.y)
         const ember = n.root ? 0.62 : 0.42
         const bright = ember + (1.15 - ember) * k + Math.min(1, n.energy) * 0.5
-        const col = scale(mix(h.color, WHITE, 0.12 + 0.45 * Math.min(1, n.energy) + n.spawnFlash * 0.4), bright)
+        const e = Math.min(1, n.energy)
+        const col = scale(mix(h.color, WHITE, 0.08 + 0.3 * e + n.spawnFlash * 0.4), bright)
         disc(x, y, r + 1.4 * S, [0.01, 0.012, 0.025], 0.85) // dark rim separates overlapping bodies
-        disc(x, y, r, col, 1)
-        if (n.root) ring(x, y, r + 3.2 * S, 0.9 * S, mix(h.color, WHITE, 0.3), 0.3 + 0.5 * k, true)
+        orb(x, y, r, col, 0.45 + 0.9 * e + n.spawnFlash)
+        if (n.root) {
+          // parents are stars: a fine orbit ring and a flare that brightens with activity
+          ring(x, y, r + 3.2 * S, 0.8 * S, mix(h.color, WHITE, 0.3), 0.18 + 0.4 * k, true)
+          const fl = clamp01((r - 4 * S) / (10 * S))
+          flare(x, y, r * 2.6 + 18 * S * (0.4 + e), 0.55 * S, mix(h.color, WHITE, 0.55), (0.12 + 0.6 * e + 0.25 * k) * fl)
+        }
       }
     }
 
@@ -328,16 +391,22 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
     layer = 1
     if (av.alive) text("kit", sx(av.x) + 9 * S, sy(av.y) - 8 * S, 13 * S, KIT, 0.8, { weight: 600, tracking: 0.5 * S })
 
-    // Project labels caption their constellation: under (or over) the bulk of its sessions,
-    // giving way to busier projects when they would collide.
-    const placed: [number, number, number, number][] = [
-      [0, 0, 300 * unit, 130 * unit], // clock
-      [0, height - 80 * unit, 760 * unit, height], // legend
-    ]
-    const hits = (r: [number, number, number, number]) => placed.some((p) => r[0] < p[2] && r[2] > p[0] && r[1] < p[3] && r[3] > p[1])
-    const order = hubs.map((h, i) => i).filter((i) => hubs[i]!.alive)
-      .sort((a, b) => hubs[b]!.heat - hubs[a]!.heat || a - b)
+    // Project labels caption their constellation. Busier, bigger projects place first; each
+    // label tries below, above, right and left of its cluster, stays inside the frame, and
+    // fades out rather than overlap another label or a session.
+    const M = 22 * unit
+    const placed: [number, number, number, number][] = [[0, 0, 300 * unit, 130 * unit]] // clock
+    const bodies: [number, number, number][] = []
+    for (const n of nodes) if (n.alive && n.root) bodies.push([sx(n.x), sy(n.y), n.r * bodyScale + 3 * S])
+    const hits = (r: [number, number, number, number], own: number) =>
+      placed.some((p) => r[0] < p[2] && r[2] > p[0] && r[1] < p[3] && r[3] > p[1]) ||
+      bodies.some(([x, y, rad], bi) => x + rad > r[0] && x - rad < r[2] && y + rad > r[1] && y - rad < r[3] && ownBodies[bi] !== own)
+    const ownBodies: number[] = []
+    for (const n of nodes) if (n.alive && n.root) ownBodies.push(n.cluster)
+    const importance = (h: (typeof hubs)[number]) => clamp01(h.heat * 1.2 + Math.exp(-(t - h.lastActive) / 3) * 0.45) + Math.log2(1 + h.count) * 0.12
+    const order = hubs.map((_, i) => i).filter((i) => hubs[i]!.alive).sort((a, b) => importance(hubs[b]!) - importance(hubs[a]!) || a - b)
     const px = 14 * S
+    const outro = clamp01((t - sim.warp.end - 0.8) / 1.5)
     for (const i of order) {
       const h = hubs[i]!
       let cx = 0, cy = 0, m = 0
@@ -357,32 +426,39 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
           const r = n.r * bodyScale + 5 * S
           x0 = Math.min(x0, x - r); x1 = Math.max(x1, x + r); y0 = Math.min(y0, y - r); y1 = Math.max(y1, y + r)
         }
-        cx = (x0 + x1) / 2
+        cx = (x0 + x1) / 2; cy = (y0 + y1) / 2
       }
       const w = measure(h.label, px, 500, 0.3 * S)
-      const st = (labels[i] ??= { x: cx, y: y1 + 18 * S, a: 0, side: 1 })
-      const cand = (side: number): [number, number, number, number] => {
-        const y = side > 0 ? y1 + 17 * S : y0 - 7 * S
-        return [cx - w / 2 - 4 * S, y - px, cx + w / 2 + 4 * S, y + 4 * S]
+      // candidate baselines (x is the label's center)
+      const cands: [number, number][] = [
+        [cx, y1 + 17 * S], [cx, y0 - 7 * S],
+        [x1 + 8 * S + w / 2, cy + 5 * S], [x0 - 8 * S - w / 2, cy + 5 * S],
+      ]
+      const rectOf = ([x, y]: [number, number]): [number, number, number, number] => {
+        // edge-aware: slide the label back inside the frame
+        const cxl = Math.min(width - M - w / 2, Math.max(M + w / 2, x))
+        const cyl = Math.min(height - M, Math.max(M + px, y))
+        return [cxl - w / 2 - 4 * S, cyl - px, cxl + w / 2 + 4 * S, cyl + 4 * S]
       }
-      let side = st.side, dim = 1
-      if (hits(cand(side))) {
-        if (!hits(cand(-side))) side = -side
-        else dim = 0.2
-      }
-      st.side = side
-      const r = cand(side)
-      placed.push(r)
-      const tx = cx, ty = side > 0 ? y1 + 17 * S : y0 - 7 * S
-      const fresh = st.a === 0
-      st.x = fresh ? tx : st.x + (tx - st.x) * 0.16
-      st.y = fresh ? ty : st.y + (ty - st.y) * 0.16
-      const heat = clamp01(h.heat * 1.4 + Math.exp(-(t - h.lastActive) / 3) * 0.5)
+      const st = (labels[i] ??= { x: cx, y: y1 + 17 * S, a: 0, side: 0 })
+      // prefer the slot we used last frame, so labels don't hop around
+      const tryOrder = [st.side, 0, 1, 2, 3].filter((v, k, arr) => arr.indexOf(v) === k)
+      let chosen = -1
+      for (const c of tryOrder) if (!hits(rectOf(cands[c]!), i)) { chosen = c; break }
+      const visible = chosen >= 0
+      if (visible) st.side = chosen
+      const r = rectOf(cands[st.side]!)
+      if (visible) placed.push(r)
+      const tx = (r[0] + r[2]) / 2, ty = r[3] - 4 * S
+      const fresh = st.a < 0.01
+      st.x = fresh ? tx : st.x + (tx - st.x) * 0.18
+      st.y = fresh ? ty : st.y + (ty - st.y) * 0.18
+      const imp = importance(h)
       const born = clamp01((t - h.born - 0.15) / 0.8)
-      // in the closing pull-back every project is named: the map of the day
-      const outro = clamp01((t - sim.warp.end - 0.8) / 1.5)
-      const ta = Math.max(0.36 + 0.6 * heat, 0.78 * outro) * born * (dim + (1 - dim) * outro * 0.6)
-      st.a = Math.max(1e-4, st.a + (ta - st.a) * 0.12)
+      // small, quiet projects recede when the camera pulls far back
+      const zoomFade = clamp01(0.45 + imp + z * 0.6)
+      const ta = visible ? Math.max((0.3 + 0.65 * clamp01(imp)) * zoomFade, 0.75 * outro) * born : 0
+      st.a = Math.max(0, st.a + (ta - st.a) * 0.14)
       text(h.label, st.x, st.y, px, mix(h.color, WHITE, 0.6), st.a, { weight: 500, align: "center", tracking: 0.3 * S })
     }
 
@@ -411,26 +487,6 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
         text(ch, x + w / 2, T + 44 * unit, px, [0.93, 0.95, 1], 0.92 * ui, { weight: 300, align: "center", snap: true })
         x += w
       }
-    }
-
-    // legend
-    {
-      const y = height - 50 * unit
-      let x = L
-      const px = 12.5 * unit
-      const c: RGB = [0.75, 0.79, 0.9]
-      const a = 0.55 * ui
-      const item = (draw: (x: number) => number, label: string) => {
-        const w = draw(x)
-        x += w + 8 * unit
-        x += text(label, x, y + 4.5 * unit, px, c, a, { weight: 500, tracking: 0.4 * unit, snap: true }) + 22 * unit
-      }
-      const base: RGB = [0.48, 0.64, 1.0]
-      item((x) => { disc(x + 5 * unit, y, 4 * unit, base, ui); ring(x + 5 * unit, y, 7 * unit, 0.9 * unit, base, 0.6 * ui); return 12 * unit }, "session")
-      item((x) => { disc(x + 3 * unit, y, 2.6 * unit, scale(base, 0.8), ui); return 6 * unit }, "subagent")
-      item((x) => { glow(x + 4 * unit, y, 12 * unit, KIT, 0.6 * ui); disc(x + 4 * unit, y, 2.6 * unit, WHITE, 1.4 * ui, true); return 8 * unit }, "kit")
-      item((x) => { line(x, y, x + 16 * unit, y, 0.8 * unit, GOLD, 0.8 * ui, 1, true); disc(x + 16 * unit, y, 2 * unit, GOLD, ui, true); return 18 * unit }, "session → session")
-      item((x) => { disc(x + 2 * unit, y, 1.3 * unit, [0.85, 0.9, 1], ui, true); disc(x + 7 * unit, y - 3 * unit, 1 * unit, [0.85, 0.9, 1], 0.7 * ui, true); return 9 * unit }, "tool call")
     }
 
     return { count: counts[0]!, overCount: counts[1]!, cam }

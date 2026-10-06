@@ -1,6 +1,6 @@
 // Quads are drawn in screen pixels. Each one is 16 floats:
 //   a: x0 y0 x1 y1    b: size thick kind endAlpha    c: r g b a    uv: u0 v0 u1 v1
-// kind: 0 glow, 1 disc, 2 ring, 3 line, 4 text, 5 soft line; +10 = additive (writes no alpha)
+// kind: 0 glow, 1 disc, 2 ring, 3 line, 4 text, 5 soft line, 6 orb, 7 star flare; +10 = additive (writes no alpha)
 export const FLOATS = 16
 
 export const quadWgsl = /* wgsl */ `
@@ -39,6 +39,7 @@ struct Out {
   } else {
     var e = q.b.x + 1.5;
     if (kind == 2.0) { e = q.b.x + q.b.y + 1.5; }
+    if (kind == 7.0) { e = q.b.x + q.b.y * 3.0 + 1.5; }
     p = q.a.xy + (c * 2.0 - 1.0) * e;
   }
   var o: Out;
@@ -82,6 +83,29 @@ fn segDist(p: vec2f, a: vec2f, b: vec2f) -> vec2f {
     let s = segDist(in.p, q.a.xy, q.a.zw);
     let d = s.x / max(q.b.x, 0.001);
     cov = max(0.0, exp(-d * d * 4.5) - 0.011) * mix(1.0, q.b.w, s.y);
+  } else if (kind == 6.0) {
+    // orb: a lit sphere-ish body. Hot core, soft limb, a faint highlight up and to the left,
+    // and a rim that catches the halo so it reads as volume rather than a flat ring.
+    let rel = in.p - q.a.xy;
+    let r = max(q.b.x, 0.5);
+    let d = length(rel) / r;
+    cov = clamp(q.b.x - length(rel) + 0.5, 0.0, 1.0);
+    let core = exp(-d * d * 2.2);
+    let limb = mix(0.5, 1.0, sqrt(max(0.0, 1.0 - d * d)));
+    let hl = exp(-dot(rel / r + vec2f(0.35, 0.4), rel / r + vec2f(0.35, 0.4)) * 6.0);
+    let rim = smoothstep(0.7, 1.0, d) * 0.35;
+    let shade = q.c.rgb * (limb * 0.8 + rim) + mix(q.c.rgb, vec3f(1.0), 0.6) * (core * q.b.y + hl * 0.25);
+    let a6 = cov * q.c.a;
+    return vec4f(shade * a6, select(a6, 0.0, additive));
+  } else if (kind == 7.0) {
+    // four-point star flare: thin gaussian spikes that taper to nothing
+    let rel = in.p - q.a.xy;
+    let len = max(q.b.x, 1.0);
+    let w = max(q.b.y, 0.4);
+    let h = exp(-(rel.y * rel.y) / (w * w)) * pow(max(0.0, 1.0 - abs(rel.x) / len), 3.0);
+    let v = exp(-(rel.x * rel.x) / (w * w)) * pow(max(0.0, 1.0 - abs(rel.y) / len), 3.0);
+    let c = exp(-dot(rel, rel) / (w * w * 9.0));
+    cov = max(h, v) + c * 0.6;
   } else {
     // text: red = fill, green = soft shadow that darkens what's behind
     let fill = texel.r * q.c.a;
@@ -129,7 +153,7 @@ struct P { dir: vec2f, pad: vec2f }
 
 // Background, bloom composite, filmic tonemap, vignette and dither.
 export const compositeWgsl = /* wgsl */ `
-struct P { size: vec2f, cam: vec2f, zoom: f32, time: f32, bloom: f32, exposure: f32 }
+struct P { size: vec2f, cam: vec2f, zoom: f32, time: f32, bloom: f32, exposure: f32, blur: vec2f, grain: f32, pad: f32 }
 @group(0) @binding(0) var scene: texture_2d<f32>;
 @group(0) @binding(1) var b1: texture_2d<f32>;
 @group(0) @binding(2) var b2: texture_2d<f32>;
@@ -171,16 +195,35 @@ fn aces(x: vec3f) -> vec3f {
   let neb = smoothstep(0.45, 0.95, n1) * 0.55 + smoothstep(0.55, 1.0, n2) * 0.35;
   bg += neb * mix(vec3f(0.035, 0.03, 0.08), vec3f(0.01, 0.045, 0.06), n2) * 0.9;
 
-  let s = textureSampleLevel(scene, smp, uv, 0.0);
-  let bloom = textureSampleLevel(b1, smp, uv, 0.0).rgb * 0.55
-            + textureSampleLevel(b2, smp, uv, 0.0).rgb * 0.55
-            + textureSampleLevel(b3, smp, uv, 0.0).rgb * 0.7;
+  // camera motion blur: average the scene along the camera's screen velocity
+  var s = vec4f(0.0);
+  let bv = params.blur / params.size;
+  if (length(params.blur) > 0.75) {
+    for (var i = 0; i < 9; i++) {
+      let f = f32(i) / 8.0 - 0.5;
+      s += textureSampleLevel(scene, smp, uv + bv * f, 0.0);
+    }
+    s /= 9.0;
+  } else {
+    s = textureSampleLevel(scene, smp, uv, 0.0);
+  }
+  // chromatic bloom: the wide layers split slightly, red outward and blue inward
+  let ofs = (uv - 0.5) * 0.012;
+  let wide = vec3f(
+    textureSampleLevel(b2, smp, uv + ofs, 0.0).r * 0.55 + textureSampleLevel(b3, smp, uv + ofs * 2.0, 0.0).r * 0.75,
+    textureSampleLevel(b2, smp, uv, 0.0).g * 0.55 + textureSampleLevel(b3, smp, uv, 0.0).g * 0.75,
+    textureSampleLevel(b2, smp, uv - ofs, 0.0).b * 0.55 + textureSampleLevel(b3, smp, uv - ofs * 2.0, 0.0).b * 0.75);
+  let bloom = textureSampleLevel(b1, smp, uv, 0.0).rgb * 0.5 + wide;
   var hdr = bg * (1.0 - s.a) + s.rgb + bloom * params.bloom;
   var col = aces(hdr * params.exposure);
   // vignette
   let v = smoothstep(1.25, 0.35, length(centered * vec2f(0.9, 1.1)));
   col *= mix(0.72, 1.0, v);
   col = pow(col, vec3f(1.0 / 1.12));
+  // film grain, strongest in the midtones, re-seeded every frame
+  let lum = dot(col, vec3f(0.2126, 0.7152, 0.0722));
+  let g = hash(px * 0.73 + vec2f(fract(params.time * 7.31) * 517.0, fract(params.time * 3.17) * 911.0)) - 0.5;
+  col += g * params.grain * (0.35 + 1.4 * lum * (1.0 - lum));
   col += (hash(px + fract(params.time) * 91.0) - 0.5) / 255.0 * 1.5;
   return vec4f(col, 1.0);
 }

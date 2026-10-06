@@ -5,6 +5,8 @@ import { buildWarp, type Warp } from "./warp"
 
 export const STEP = 1 / 480
 export const BEAM_TRAVEL = 0.16
+/** a parent gathers itself this long before a subagent is released */
+export const ANTICIPATION = 0.16
 
 export type RGB = [number, number, number]
 
@@ -62,6 +64,7 @@ export interface Node {
   energy: number
   lastActive: number
   spawnFlash: number
+  gather: number // anticipation: light drawn in before a child is released
 }
 
 export interface Ring { node: number; t0: number; dur: number; grow: number; color: RGB; width: number; alpha: number }
@@ -91,6 +94,9 @@ export class Sim {
   avatar = { x: 0, y: 0, vx: 0, vy: 0, target: -1, alive: false, lastPrompt: -1e9, trail: [] as [number, number][], recent: [] as { n: number; t: number }[] }
   private eventTimes: Float64Array
   private next = 0
+  private pendingBirths: { n: number; at: number }[] = []
+  /** optional observer for audio: every dispatched event with the time it took effect */
+  onEvent?: (e: [number, number, number, number], time: number) => void
   private rand = rng(7)
   private bornOrder = 0
 
@@ -124,7 +130,7 @@ export class Sim {
     })
     this.nodes = log.sessions.map((s) => ({
       cluster: s.cluster, parent: s.parent, root: s.parent === null, title: s.title,
-      alive: false, born: 0, x: 0, y: 0, vx: 0, vy: 0, r: 0, rv: 0, msgs: 0, energy: 0, lastActive: -1e9, spawnFlash: 0,
+      alive: false, born: 0, x: 0, y: 0, vx: 0, vy: 0, r: 0, rv: 0, msgs: 0, energy: 0, lastActive: -1e9, spawnFlash: 0, gather: 0,
     }))
   }
 
@@ -203,6 +209,7 @@ export class Sim {
 
   private spark(n: number, speed: number, life: number, size: number, angle?: number) {
     const node = this.nodes[n]!
+    if (!node.alive) return
     const i = this.sparkHead
     this.sparkHead = (this.sparkHead + 1) % MAX_SPARKS
     const a = angle ?? this.rand() * Math.PI * 2
@@ -238,10 +245,20 @@ export class Sim {
       case EV.created:
         this.born(n, false)
         break
-      case EV.subagent:
-        this.born(n, true)
+      case EV.subagent: {
+        // Anticipation: the parent draws in (contracts, light gathers), then releases the child.
+        const p = this.nodes[n]!.parent
+        if (p !== null && this.nodes[p]!.alive && !this.nodes[n]!.alive) {
+          const parent = this.nodes[p]!
+          parent.rv -= parent.r * 5
+          parent.gather = 1
+          this.pendingBirths.push({ n, at: this.time + ANTICIPATION })
+        } else {
+          this.born(n, true)
+        }
         this.touch(n, 1)
         break
+      }
       case EV.crossPrompt: {
         this.born(x, false)
         const target = this.nodes[n]!
@@ -293,7 +310,21 @@ export class Sim {
     this.time += dt
     const t = this.time
     const events = this.log.events
-    while (this.next < events.length && this.eventTimes[this.next]! <= t) this.dispatch(events[this.next++]!)
+    while (this.next < events.length && this.eventTimes[this.next]! <= t) {
+      const e = events[this.next++]!
+      this.dispatch(e)
+      this.onEvent?.(e, t)
+    }
+    if (this.pendingBirths.length) {
+      const due = this.pendingBirths.filter((b) => b.at <= t)
+      if (due.length) {
+        this.pendingBirths = this.pendingBirths.filter((b) => b.at > t)
+        for (const b of due) {
+          const node = this.nodes[b.n]!
+          if (!node.alive) { this.born(b.n, true); node.energy = Math.max(node.energy, 1) }
+        }
+      }
+    }
 
     const nodes = this.nodes
     const hubs = this.hubs
@@ -354,6 +385,11 @@ export class Sim {
         if (anchor) { anchor.vx -= ux * back; anchor.vy -= uy * back }
         else { hub.vx -= ux * back; hub.vy -= uy * back }
         fx /= ma; fy /= ma
+        // leaves orbit their parent slowly; siblings share a direction, like a little system
+        if (anchor && a.parent !== null) {
+          const spin = (a.parent % 2 ? 1 : -1) * 9
+          fx += -uy * spin; fy += ux * spin
+        }
       }
       for (let j = i + 1; j < nodes.length; j++) {
         const b = nodes[j]!
@@ -393,6 +429,7 @@ export class Sim {
       n.x += n.vx * dt; n.y += n.vy * dt
       n.energy *= Math.exp(-1.1 * dt)
       n.spawnFlash *= Math.exp(-3 * dt)
+      n.gather *= Math.exp(-7 * dt)
       // radius spring: underdamped so new sessions pop, then grows with message count
       const target = (n.root ? 4.2 : 2.6) + Math.sqrt(n.msgs) * (n.root ? 0.62 : 0.5)
       const w = 16, z = 0.42
