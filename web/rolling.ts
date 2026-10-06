@@ -140,7 +140,7 @@ export class Counter {
     const commas: { x: number; opacity: number }[] = []
     for (let i = 3; i < this.places.length; i += 3) {
       const p = this.places[i]!
-      commas.push({ x: p.x.sample(t)[0] + 1.02, opacity: Math.min(1, p.opacity.sample(t)[0]) })
+      commas.push({ x: p.x.sample(t)[0] + 1.21, opacity: Math.min(1, p.opacity.sample(t)[0]) })
     }
     return { columns, commas }
   }

@@ -506,9 +506,16 @@ export function createScene(width: number, height: number, atlas: Atlas, opts: S
       flare(avx, avy, (10 + 16 * pulse) * S, 0.5 * S, KIT, 0.5 + 0.6 * pulse)
     }
 
+    // a soft dark scrim behind the clock and counters keeps them legible over busy clusters
+    {
+      const [x0, y0, x1, y1] = hud.rect
+      push((x0 + x1) * 0.35, (y0 + y1) * 0.5, 0, 0, Math.max(x1 - x0, y1 - y0) * 0.95, 0, 0, 1, [0.004, 0.005, 0.012], 0.6 * (1 - clamp01((t - sim.warp.end) / 1.2)))
+    }
+
     // ---- overlay: everything below draws after tonemapping
     layer = 1
-    if (av.alive) text("kit", sx(av.x) + 9 * S, sy(av.y) - 8 * S, 13 * S, KIT, 0.8, { weight: 600, tracking: 0.5 * S })
+    const endFade = 1 - clamp01((t - sim.warp.end) / 1.2)
+    if (av.alive) text("kit", sx(av.x) + 9 * S, sy(av.y) - 8 * S, 13 * S, KIT, 0.8 * endFade, { weight: 600, tracking: 0.5 * S })
 
     // Project labels caption their constellation. Busier, bigger projects place first; each
     // label tries below, above, right and left of its cluster, stays inside the frame, and
