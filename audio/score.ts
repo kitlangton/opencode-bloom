@@ -22,10 +22,10 @@ const { values: a } = parseArgs({
 
 const W = Number(a.width), H = Number(a.height), FPS = Number(a.fps), D = Number(a.duration)
 const log: EventLog = await Bun.file(join(import.meta.dir, "../data", a.data!)).json()
-const sim = new Sim(log, { duration: D })
+const sim = new Sim(log, { duration: D, outro: D >= 60 ? 7 : 5 })
 // Text is irrelevant to sound; a stub atlas lets the scene (and so the camera) run headless.
 const atlas: any = { get: (s: string, px: number) => ({ uv: [0, 0, 1, 1], w: s.length * px * 0.6 + 4, h: px * 1.4, ascent: px }), pad: () => 2, takeDirty: () => false }
-const scene = createScene(W, H, atlas, { titles: false, dateLabel: () => "", timeLabel: () => "" })
+const scene = createScene(W, H, atlas, { titles: false, dateLabel: () => "", timeLabel: () => "00:00", hourOf: () => 0 })
 
 type Hit = { e: [number, number, number, number]; t: number }
 const hits: Hit[] = []

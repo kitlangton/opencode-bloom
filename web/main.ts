@@ -44,26 +44,31 @@ const scene = createScene(width, height, atlas, {
     const d = local(ms)
     return `${DAYS[d.getUTCDay()]} ${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`.toUpperCase()
   },
+  hourOf: (ms) => {
+    const d = local(ms)
+    return d.getUTCHours() + d.getUTCMinutes() / 60 + d.getUTCSeconds() / 3600
+  },
   timeLabel: (ms) => {
     const d = local(ms)
     return `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`
   },
 })
 
-const sim = new Sim(log, { duration })
+const sim = new Sim(log, { duration, outro: duration >= 60 ? 7 : 5 })
 const scale = Math.min(width, height) / 1080
 const totalFrames = Math.round(duration * fps)
 
 function renderFrame(f: number) {
   sim.advanceTo(f / fps)
   sim.sampleTrail()
-  const { count, overCount, cam } = scene.build(sim, 1 / fps)
+  const { count, overCount, cam, sky } = scene.build(sim, 1 / fps)
   if (atlas.takeDirty()) gpu.uploadAtlas(atlas.canvas)
   gpu.render(scene.data, count, scene.overData, overCount, {
     cam: [cam.x, cam.y], zoom: cam.zoom, time: f / fps, bloom: 1, exposure: 1.05,
     // shutter of half a frame along the camera's screen-space velocity
     blur: [-cam.vx * cam.zoom * scale / fps * 0.5, -cam.vy * cam.zoom * scale / fps * 0.5],
     grain: 0.022,
+    ...sky.post(),
   })
 }
 

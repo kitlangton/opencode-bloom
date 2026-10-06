@@ -10,7 +10,8 @@ export interface Warp {
   toReal(sec: number): number
 }
 
-export function buildWarp(times: number[], spanMs: number, start: number, end: number): Warp {
+/** `boosts` slow time around chosen real moments: [ms, extra rate, sigma in minutes] */
+export function buildWarp(times: number[], spanMs: number, start: number, end: number, boosts: [number, number, number][] = []): Warp {
   const BIN = 60_000
   const n = Math.ceil(spanMs / BIN)
   const raw = new Float64Array(n)
@@ -30,7 +31,14 @@ export function buildWarp(times: number[], spanMs: number, start: number, end: n
   }
   let max = 0
   for (const v of sm) max = Math.max(max, v)
-  const rate = Array.from(sm, (v) => 0.07 + Math.pow(v / (max || 1), 0.6))
+  const rate = Array.from(sm, (v, i) => {
+    let r = 0.07 + Math.pow(v / (max || 1), 0.6)
+    for (const [ms, extra, sig] of boosts) {
+      const d = (i + 0.5 - ms / BIN) / sig
+      r += extra * Math.exp(-0.5 * d * d)
+    }
+    return r
+  })
   const cum = new Float64Array(n + 1)
   for (let i = 0; i < n; i++) cum[i + 1] = cum[i]! + rate[i]!
   const total = cum[n]!

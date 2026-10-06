@@ -67,9 +67,14 @@ export interface Node {
   gather: number // anticipation: light drawn in before a child is released
 }
 
+/** A camera moment: a burst of subagents worth slowing down for. Times are video seconds. */
+export interface Moment { parent: number; cluster: number; at: number; end: number; count: number }
+
 export interface Ring { node: number; t0: number; dur: number; grow: number; color: RGB; width: number; alpha: number }
-export interface Comet { from: number; to: number; t0: number; dur: number; bend: number }
-export interface Beam { to: number; t0: number }
+/** Agent-to-agent prompts. "cross" crosses projects and leaves its arc lingering. */
+export interface Comet { from: number; to: number; t0: number; dur: number; bend: number; kind: "cross" | "agent" }
+export const COOL: RGB = [0.62, 0.8, 1.0]
+export type Cue = { kind: "kit" | "agent" | "cross" | "moment"; node: number; time: number }
 export interface Pulse { from: number; to: number; t0: number; dur: number }
 
 const MAX_SPARKS = 6000
@@ -80,18 +85,25 @@ export class Sim {
   readonly duration: number
   readonly hubs: Hub[]
   readonly nodes: Node[]
+  readonly moments: Moment[]
   time = 0
   rings: Ring[] = []
   comets: Comet[] = []
-  beams: Beam[] = []
+  cues: Cue[] = []
+  counts = { sessions: 0, subagents: 0, messages: 0 }
   pulses: Pulse[] = []
   // Sparks live in flat arrays: x, y, vx, vy, age, life, size, node-color index.
   sx = new Float32Array(MAX_SPARKS); sy = new Float32Array(MAX_SPARKS)
   svx = new Float32Array(MAX_SPARKS); svy = new Float32Array(MAX_SPARKS)
   sage = new Float32Array(MAX_SPARKS); slife = new Float32Array(MAX_SPARKS)
-  ssize = new Float32Array(MAX_SPARKS); shub = new Int16Array(MAX_SPARKS)
+  ssize = new Float32Array(MAX_SPARKS); shub = new Int16Array(MAX_SPARKS); skind = new Int8Array(MAX_SPARKS)
   sparkHead = 0
-  avatar = { x: 0, y: 0, vx: 0, vy: 0, target: -1, alive: false, lastPrompt: -1e9, trail: [] as [number, number][], recent: [] as { n: number; t: number }[] }
+  /** Kit: a comet that flies an arc to each session he prompts, then idles in orbit there. */
+  avatar = {
+    x: 0, y: 0, vx: 0, vy: 0, alive: false, target: -1, lastArrive: -1e9,
+    flight: null as null | { fx: number; fy: number; to: number; t0: number; dur: number; bend: number },
+    queue: [] as number[], trail: [] as [number, number][], orbit: 0, flights: 0,
+  }
   private eventTimes: Float64Array
   private next = 0
   private pendingBirths: { n: number; at: number }[] = []
@@ -100,13 +112,30 @@ export class Sim {
   private rand = rng(7)
   private bornOrder = 0
 
-  constructor(log: EventLog, opts: { duration: number; intro?: number; outro?: number }) {
+  constructor(log: EventLog, opts: { duration: number; intro?: number; outro?: number; moments?: number }) {
     this.log = log
     this.duration = opts.duration
     const intro = opts.intro ?? 1.2
     const outro = opts.outro ?? 5
     const span = log.meta.to - log.meta.from
-    this.warp = buildWarp(log.events.map((e) => e[0]), span, intro, opts.duration - outro)
+    const times = log.events.map((e) => e[0])
+    const base = buildWarp(times, span, intro, opts.duration - outro)
+    const bursts = findBursts(log)
+    // Pick the most significant bursts, kept apart in video time so each gets room.
+    const max = opts.moments ?? Math.max(1, Math.round(opts.duration / 18))
+    const gap = Math.max(6, opts.duration / (max + 2))
+    const chosen: typeof bursts = []
+    for (const b of bursts) {
+      if (chosen.length >= max) break
+      const v = base.toVideo(b.start)
+      if (v < intro + 3 || v > opts.duration - outro - 3) continue
+      if (chosen.some((c) => Math.abs(base.toVideo(c.start) - v) < gap)) continue
+      chosen.push(b)
+    }
+    // Slow time around each: about 1.6x the local rate for a few minutes.
+    this.warp = buildWarp(times, span, intro, opts.duration - outro, chosen.map((b) => [(b.start + b.end) / 2, 0.55, 2.5]))
+    this.moments = chosen.map((b) => ({ parent: b.parent, cluster: log.sessions[b.parent]!.cluster, at: this.warp.toVideo(b.start), end: this.warp.toVideo(b.end), count: b.count }))
+      .sort((a, b) => a.at - b.at)
     this.eventTimes = Float64Array.from(log.events, (e) => this.warp.toVideo(e[0]))
     const hueOf = new Map<number, number>()
     let nextHue = 0
@@ -205,9 +234,11 @@ export class Sim {
     node.rv = 0
     node.spawnFlash = spawned ? 1 : 0.5
     hub.count++
+    if (node.root) this.counts.sessions++
+    else this.counts.subagents++
   }
 
-  private spark(n: number, speed: number, life: number, size: number, angle?: number) {
+  private spark(n: number, speed: number, life: number, size: number, angle?: number, kind = 4) {
     const node = this.nodes[n]!
     if (!node.alive) return
     const i = this.sparkHead
@@ -223,6 +254,7 @@ export class Sim {
     this.slife[i] = life * (0.7 + this.rand() * 0.6)
     this.ssize[i] = size
     this.shub[i] = node.cluster
+    this.skind[i] = kind
   }
 
   private burst(n: number, count: number, speed: number) {
@@ -266,7 +298,9 @@ export class Sim {
           this.bornHub(target.cluster, this.hubs[this.nodes[x]!.cluster]!)
           this.born(n, false)
         }
-        this.comets.push({ from: x, to: n, t0: this.time, dur: 1.1, bend: this.rand() < 0.5 ? -0.28 : 0.28 })
+        this.comets.push({ from: x, to: n, t0: this.time, dur: 1.1, bend: this.rand() < 0.5 ? -0.28 : 0.28, kind: "cross" })
+        this.cues.push({ kind: "cross", node: n, time: this.time + 1.1 })
+        this.counts.messages++
         this.touch(x, 0.6)
         this.nodes[n]!.msgs++
         break
@@ -275,30 +309,32 @@ export class Sim {
         const node = this.nodes[n]!
         node.msgs++
         this.touch(n, 0.9)
+        this.counts.messages++
         if (x === 1) {
           const av = this.avatar
           if (!av.alive) {
             av.alive = true
-            av.x = node.x + 60; av.y = node.y - 60
+            av.x = node.x + 80; av.y = node.y - 80
           }
-          av.target = n
-          av.lastPrompt = this.time
-          av.recent.push({ n, t: this.time })
-          this.beams.push({ to: n, t0: this.time })
-          // the ring opens when the beam's bead lands
-          this.rings.push({ node: n, t0: this.time + BEAM_TRAVEL, dur: 1.1, grow: 34, color: KIT, width: 1.6, alpha: 0.9 })
-        } else {
-          this.rings.push({ node: n, t0: this.time, dur: 0.8, grow: 18, color: this.hubs[node.cluster]!.color, width: 1.2, alpha: 0.7 })
+          // A backlog is cut short: older prompts land as a quiet flash, no flight.
+          while (av.queue.length >= 2) this.land(av.queue.shift()!, 0.4)
+          av.queue.push(n)
+          if (!av.flight) this.launch()
+        } else if (node.parent !== null && this.nodes[node.parent]!.alive && this.time - node.born > 0.3) {
+          // a parent writes to its subagent: a dim, cool comet
+          this.comets.push({ from: node.parent, to: n, t0: this.time, dur: 0.6, bend: n % 2 ? 0.3 : -0.3, kind: "agent" })
+          this.cues.push({ kind: "agent", node: n, time: this.time + 0.6 })
         }
         break
       }
       case EV.assistant:
+        this.counts.messages++
         this.nodes[n]!.msgs++
         this.touch(n, 0.32)
         break
       case EV.tool: {
         const big = x === 1 || x === 4
-        this.spark(n, big ? 95 : 70, big ? 1.1 : 0.8, big ? 1.6 : 1.1)
+        this.spark(n, big ? 95 : 70, big ? 1.1 : 0.8, big ? 1.6 : 1.1, undefined, Math.min(4, x))
         this.touch(n, 0.05)
         break
       }
@@ -452,22 +488,37 @@ export class Sim {
       h.extent += (want - h.extent) * (1 - Math.exp(-1 * dt))
     }
 
-    // Kit's avatar glides toward the sessions he has been prompting (weighted toward the
-    // latest), like a Gource committer drifting among the files it touches.
+    // Kit's comet: minimum-jerk travel along an arc whose end tracks the moving session;
+    // between flights it eases out to a slow orbit around the last session it reached.
     const av = this.avatar
-    if (av.alive && av.target >= 0) {
-      let tx = 0, ty = 0, tw = 0
-      for (const p of av.recent) {
-        const w = Math.exp(-(t - p.t) / 0.9) * (p.n === av.target ? 2 : 1)
-        const n = nodes[p.n]!
-        tx += n.x * w; ty += n.y * w; tw += w
+    if (av.alive) {
+      const f = av.flight
+      if (f) {
+        const u = Math.min(1, (t - f.t0) / f.dur)
+        const n = nodes[f.to]!
+        const p = arc(f.fx, f.fy, n.x, n.y, f.bend, smootherstep(u))
+        av.vx = (p[0] - av.x) / dt; av.vy = (p[1] - av.y) / dt
+        av.x = p[0]; av.y = p[1]
+        if (u >= 1) {
+          av.flight = null
+          av.vx = 0; av.vy = 0
+          this.land(f.to, 1)
+          av.target = f.to
+          av.lastArrive = t
+          av.orbit = Math.atan2(f.fy - n.y, f.fx - n.x)
+          this.cues.push({ kind: "kit", node: f.to, time: t })
+          if (av.queue.length) this.launch()
+        }
+      } else if (av.target >= 0) {
+        const n = nodes[av.target]!
+        av.orbit += dt * 0.7
+        const rad = n.r + 16
+        const tx = n.x + Math.cos(av.orbit) * rad, ty = n.y + Math.sin(av.orbit) * rad
+        const w = 5, z = 0.95
+        av.vx += (-(av.x - tx) * w * w - 2 * z * w * av.vx) * dt
+        av.vy += (-(av.y - ty) * w * w - 2 * z * w * av.vy) * dt
+        av.x += av.vx * dt; av.y += av.vy * dt
       }
-      if (tw < 1e-4) { const n = nodes[av.target]!; tx = n.x; ty = n.y; tw = 1 }
-      tx = tx / tw + 26; ty = ty / tw - 26
-      const w = 3.6, z = 0.9
-      av.vx += (-(av.x - tx) * w * w - 2 * z * w * av.vx) * dt
-      av.vy += (-(av.y - ty) * w * w - 2 * z * w * av.vy) * dt
-      av.x += av.vx * dt; av.y += av.vy * dt
     }
 
     // Sparks: ballistic with drag.
@@ -482,10 +533,39 @@ export class Sim {
     if (Math.round(t / dt) % 32 === 0) {
       this.rings = this.rings.filter((r) => t - r.t0 < r.dur)
       this.comets = this.comets.filter((c) => t - c.t0 < c.dur + 2.2)
-      this.beams = this.beams.filter((b) => t - b.t0 < 0.9)
-      this.avatar.recent = this.avatar.recent.filter((p) => t - p.t < 5)
       this.pulses = this.pulses.filter((p) => t - p.t0 < p.dur + 0.1)
     }
+  }
+
+  private launch() {
+    const av = this.avatar
+    const to = av.queue.shift()
+    if (to === undefined) return
+    const n = this.nodes[to]!
+    const d = Math.hypot(n.x - av.x, n.y - av.y)
+    // quicker hops when prompts are piling up
+    const hurry = av.queue.length ? 0.75 : 1
+    av.flight = { fx: av.x, fy: av.y, to, t0: this.time, dur: Math.min(0.75, Math.max(0.3, 0.22 + d / 900)) * hurry, bend: av.flights++ % 2 ? 0.22 : -0.22 }
+  }
+
+  /** Kit's prompt arrives: the session flashes and a warm ring opens. */
+  private land(n: number, strength: number) {
+    const node = this.nodes[n]!
+    node.energy = Math.min(2.5, node.energy + 0.5 * strength)
+    node.spawnFlash = Math.max(node.spawnFlash, 0.35 * strength)
+    this.rings.push({ node: n, t0: this.time, dur: 1.0, grow: 30 * strength, color: KIT, width: 1.5, alpha: 0.85 * strength })
+  }
+
+  /** How strongly a camera moment holds right now (0..1), and which. */
+  moment(t = this.time): { e: number; m: Moment | null } {
+    let best = 0, which: Moment | null = null
+    for (const m of this.moments) {
+      const up = smootherstep(Math.min(1, Math.max(0, (t - (m.at - 2.0)) / 1.5)))
+      const down = 1 - smootherstep(Math.min(1, Math.max(0, (t - (m.end + 2.4)) / 1.7)))
+      const e = up * down
+      if (e > best) { best = e; which = m }
+    }
+    return { e: best, m: which }
   }
 
   /** Called once per rendered frame to sample the avatar trail. */
@@ -493,6 +573,43 @@ export class Sim {
     const av = this.avatar
     if (!av.alive) return
     av.trail.unshift([av.x, av.y])
-    if (av.trail.length > 18) av.trail.pop()
+    if (av.trail.length > 14) av.trail.pop()
   }
+}
+
+/** Groups of 3+ subagents from one parent within a few real minutes, most significant first. */
+export function findBursts(log: EventLog) {
+  const WINDOW = 4 * 60_000
+  const byParent = new Map<number, number[]>()
+  for (const e of log.events) if (e[1] === EV.subagent && e[3] >= 0) {
+    const list = byParent.get(e[3]) ?? []
+    list.push(e[0])
+    byParent.set(e[3], list)
+  }
+  const bursts: { parent: number; start: number; end: number; count: number; score: number }[] = []
+  for (const [parent, ts] of byParent) {
+    let i = 0
+    while (i < ts.length) {
+      let j = i
+      while (j + 1 < ts.length && ts[j + 1]! - ts[i]! <= WINDOW) j++
+      const count = j - i + 1
+      if (count >= 3) {
+        // tighter bursts score higher
+        const spread = Math.max(15_000, ts[j]! - ts[i]!)
+        bursts.push({ parent, start: ts[i]!, end: ts[j]!, count, score: count * Math.sqrt(WINDOW / spread) })
+        i = j + 1
+      } else i++
+    }
+  }
+  return bursts.sort((a, b) => b.score - a.score || a.start - b.start)
+}
+
+export const smootherstep = (u: number) => u * u * u * (u * (u * 6 - 15) + 10)
+
+/** A quadratic arc bowed sideways by `bend` (fraction of the chord). */
+export function arc(ax: number, ay: number, bx: number, by: number, bend: number, s: number): [number, number] {
+  const dx = bx - ax, dy = by - ay
+  const mx = (ax + bx) / 2 - dy * bend, my = (ay + by) / 2 + dx * bend
+  const i = 1 - s
+  return [i * i * ax + 2 * i * s * mx + s * s * bx, i * i * ay + 2 * i * s * my + s * s * by]
 }

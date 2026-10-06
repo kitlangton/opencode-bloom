@@ -107,9 +107,14 @@ fn segDist(p: vec2f, a: vec2f, b: vec2f) -> vec2f {
     let c = exp(-dot(rel, rel) / (w * w * 9.0));
     cov = max(h, v) + c * 0.6;
   } else {
-    // text: red = fill, green = soft shadow that darkens what's behind
-    let fill = texel.r * q.c.a;
-    let shadow = texel.g * q.c.a * 0.75;
+    // text: red = fill, green = soft shadow that darkens what's behind.
+    // b.x/b.y/b.w optionally clip to a reel window [top, bottom] with a soft edge fade.
+    var clip = 1.0;
+    if (q.b.w > 0.0) {
+      clip = smoothstep(q.b.x, q.b.x + q.b.w, in.p.y) * (1.0 - smoothstep(q.b.y - q.b.w, q.b.y, in.p.y));
+    }
+    let fill = texel.r * abs(q.c.a) * clip;
+    let shadow = select(texel.g * q.c.a * 0.75 * clip, 0.0, q.c.a < 0.0);
     return vec4f(q.c.rgb * fill, max(fill, shadow));
   }
   let a = cov * q.c.a;
@@ -153,7 +158,10 @@ struct P { dir: vec2f, pad: vec2f }
 
 // Background, bloom composite, filmic tonemap, vignette and dither.
 export const compositeWgsl = /* wgsl */ `
-struct P { size: vec2f, cam: vec2f, zoom: f32, time: f32, bloom: f32, exposure: f32, blur: vec2f, grain: f32, pad: f32 }
+struct P {
+  size: vec2f, cam: vec2f, zoom: f32, time: f32, bloom: f32, exposure: f32, blur: vec2f, grain: f32, stars: f32,
+  top: vec4f, bottom: vec4f, glow: vec4f, tint: vec4f,
+}
 @group(0) @binding(0) var scene: texture_2d<f32>;
 @group(0) @binding(1) var b1: texture_2d<f32>;
 @group(0) @binding(2) var b2: texture_2d<f32>;
@@ -187,13 +195,17 @@ fn aces(x: vec3f) -> vec3f {
   let px = uv * params.size;
   let aspect = params.size.x / params.size.y;
   let centered = (uv - 0.5) * vec2f(aspect, 1.0);
-  // Deep night gradient with a faint, slowly parallaxing nebula.
-  var bg = mix(vec3f(0.018, 0.026, 0.05), vec3f(0.006, 0.008, 0.016), smoothstep(0.0, 0.95, length(centered)));
+  // Sky follows the clock: a vertical gradient, a horizon glow at dawn and dusk, and the
+  // old radial falloff kept as a soft vignette inside the sky.
+  var bg = mix(params.top.rgb, params.bottom.rgb, smoothstep(0.0, 1.0, uv.y));
+  let hz = vec2f((uv.x - 0.5) * aspect * 0.55, (1.15 - uv.y) * 1.6);
+  bg += params.glow.rgb * exp(-dot(hz, hz) * 1.6);
+  bg *= mix(1.0, 0.55, smoothstep(0.2, 1.1, length(centered)));
   let wp = centered * 2.2 / pow(params.zoom, 0.25) + params.cam * 0.00025;
   let n1 = fbm(wp * 1.3 + vec2f(params.time * 0.004, 0.0));
   let n2 = fbm(wp * 2.1 - vec2f(3.1, params.time * 0.003));
   let neb = smoothstep(0.45, 0.95, n1) * 0.55 + smoothstep(0.55, 1.0, n2) * 0.35;
-  bg += neb * mix(vec3f(0.035, 0.03, 0.08), vec3f(0.01, 0.045, 0.06), n2) * 0.9;
+  bg += neb * mix(vec3f(0.035, 0.03, 0.08), vec3f(0.01, 0.045, 0.06), n2) * 0.9 * params.tint.rgb * (0.45 + 0.55 * params.stars);
 
   // camera motion blur: average the scene along the camera's screen velocity
   var s = vec4f(0.0);
@@ -213,7 +225,7 @@ fn aces(x: vec3f) -> vec3f {
     textureSampleLevel(b2, smp, uv + ofs, 0.0).r * 0.55 + textureSampleLevel(b3, smp, uv + ofs * 2.0, 0.0).r * 0.75,
     textureSampleLevel(b2, smp, uv, 0.0).g * 0.55 + textureSampleLevel(b3, smp, uv, 0.0).g * 0.75,
     textureSampleLevel(b2, smp, uv - ofs, 0.0).b * 0.55 + textureSampleLevel(b3, smp, uv - ofs * 2.0, 0.0).b * 0.75);
-  let bloom = textureSampleLevel(b1, smp, uv, 0.0).rgb * 0.5 + wide;
+  let bloom = (textureSampleLevel(b1, smp, uv, 0.0).rgb * 0.5 + wide) * mix(vec3f(1.0), params.tint.rgb, 0.18);
   var hdr = bg * (1.0 - s.a) + s.rgb + bloom * params.bloom;
   var col = aces(hdr * params.exposure);
   // vignette

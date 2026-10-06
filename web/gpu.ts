@@ -4,7 +4,8 @@ import { FLOATS, quadWgsl, downWgsl, blurWgsl, compositeWgsl, blitWgsl, yuvWgsl 
 export const MAX_QUADS = 40000
 export const MAX_OVERLAY = 4000
 
-export interface PostParams { cam: [number, number]; zoom: number; time: number; bloom: number; exposure: number; blur: [number, number]; grain: number }
+export type Vec4 = [number, number, number, number]
+export interface PostParams { cam: [number, number]; zoom: number; time: number; bloom: number; exposure: number; blur: [number, number]; grain: number; stars: number; top: Vec4; bottom: Vec4; glow: Vec4; tint: Vec4 }
 
 export async function createGpu(width: number, height: number, canvas: HTMLCanvasElement | null) {
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" })
@@ -56,7 +57,7 @@ export async function createGpu(width: number, height: number, canvas: HTMLCanva
     [q3a, blur(q3b, 0, 1)],
   ]
   const composite = effect(gpu, compositeWgsl)
-  composite.set({ scene, b1: q1a, b2: q2a, b3: q3a, smp: linear, params: { size: [width, height], cam: [0, 0], zoom: 1, time: 0, bloom: 1, exposure: 1, blur: [0, 0], grain: 0, pad: 0 } })
+  composite.set({ scene, b1: q1a, b2: q2a, b3: q3a, smp: linear, params: { size: [width, height], cam: [0, 0], zoom: 1, time: 0, bloom: 1, exposure: 1, blur: [0, 0], grain: 0, stars: 1, top: [0, 0, 0, 0], bottom: [0, 0, 0, 0], glow: [0, 0, 0, 0], tint: [1, 1, 1, 0] } })
 
   if (width % 4 || height % 4) throw new Error("width and height must be multiples of 4")
   const yuv = target(gpu, { size: [width / 4, (height * 3) / 2], format: "rgba8unorm" })
@@ -79,7 +80,7 @@ export async function createGpu(width: number, height: number, canvas: HTMLCanva
     render(data: Float32Array, count: number, over: Float32Array, overCount: number, post: PostParams) {
       quadBuf.write(data.subarray(0, count * FLOATS) as Float32Array<ArrayBuffer>)
       if (overCount) overlayBuf.write(over.subarray(0, overCount * FLOATS) as Float32Array<ArrayBuffer>)
-      composite.set({ params: { size: [width, height], ...post, pad: 0 } })
+      composite.set({ params: { size: [width, height], ...post } })
       frame(gpu, (f) => {
         f.pass({ target: scene, clear: [0, 0, 0, 0] }, (p) => { if (count) p.draw(quads, { instances: count }) })
         for (const [dst, e] of chain) f.pass(dst, e)
